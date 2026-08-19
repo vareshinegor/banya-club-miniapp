@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Клуб</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<script>window.DEV_MODE = {{ 'true' if dev_mode else 'false' }};</script>
+
+<div id="app">
+
+  <!-- Загрузка -->
+  <section id="screen-loading" class="screen screen-center">
+    <div class="spinner"></div>
+    <p class="muted">Загрузка…</p>
+  </section>
+
+  <!-- Анкета (пошаговый визард) -->
+  <section id="screen-onboarding" class="screen" hidden>
+    <div class="screen-inner">
+      <div id="wizard-progress" class="wizard-progress"></div>
+      <div id="wizard-step"></div>
+    </div>
+  </section>
+
+  <!-- Карточка мероприятия -->
+  <section id="screen-event-detail" class="screen" hidden>
+    <header class="topbar topbar-with-back">
+      <button id="event-detail-back" class="back-btn" aria-label="Назад">←</button>
+      <span>Мероприятие</span>
+    </header>
+    <div id="event-detail-content" class="tab-content"></div>
+  </section>
+
+  <!-- Основное приложение -->
+  <section id="screen-main" class="screen" hidden>
+    <header class="topbar">
+      <span id="topbar-title">Главная</span>
+    </header>
+    <div id="tab-content" class="tab-content"></div>
+    <nav class="tabbar">
+      <button class="tab-btn" data-tab="home">
+        <span class="tab-icon">🏠</span><span>Главная</span>
+      </button>
+      <button class="tab-btn" data-tab="events">
+        <span class="tab-icon">📅</span><span>Афиша</span>
+      </button>
+      <button class="tab-btn" data-tab="materials">
+        <span class="tab-icon">📚</span><span>Материалы</span>
+      </button>
+      <button class="tab-btn" data-tab="profile">
+        <span class="tab-icon">👤</span><span>Профиль</span>
+      </button>
+    </nav>
+  </section>
+
+</div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
