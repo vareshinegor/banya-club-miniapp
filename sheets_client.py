@@ -233,10 +233,23 @@ def is_signed_up(telegram_id, event_id) -> bool:
     return any(str(s.get("ID события")) == str(event_id) for s in signups)
 
 
-def create_pending_signup(telegram_id, event_id, order_id: str):
+def get_signup_quantity(telegram_id, event_id) -> int:
+    """Сколько билетов оплачено этим пользователем на это событие (0, если не записан)."""
+    for s in list_signups_for_user(telegram_id):
+        if str(s.get("ID события")) == str(event_id):
+            try:
+                return int(s.get("Количество") or 1)
+            except ValueError:
+                return 1
+    return 0
+
+
+def create_pending_signup(telegram_id, event_id, order_id: str, quantity: int = 1):
     """Создаёт (или переиспользует существующую неоплаченную) строку записи
     со статусом "ожидает оплаты" перед тем, как отправить пользователя на
-    оплату — чтобы повторные попытки не плодили дубли строк."""
+    оплату — чтобы повторные попытки не плодили дубли строк. quantity
+    перезаписывается и при переиспользовании — пользователь мог поменять
+    число билетов между попытками оплаты."""
     ws = get_worksheet(SHEET_SIGNUPS)
     _, rows = _rows_with_index(ws)
     for row_number, record in rows:
@@ -248,14 +261,16 @@ def create_pending_signup(telegram_id, event_id, order_id: str):
             col = SIGNUPS_HEADERS.index("Статус") + 1
             order_col = SIGNUPS_HEADERS.index("Заказ") + 1
             date_col = SIGNUPS_HEADERS.index("Дата записи") + 1
+            qty_col = SIGNUPS_HEADERS.index("Количество") + 1
             ws.update_cell(row_number, col, SIGNUP_STATUS_PENDING)
             ws.update_cell(row_number, order_col, order_id)
             ws.update_cell(row_number, date_col, _now())
+            ws.update_cell(row_number, qty_col, str(quantity))
             _invalidate_sheet_cache(SHEET_SIGNUPS)
             return
 
     ws.append_row(
-        [str(telegram_id), str(event_id), _now(), SIGNUP_STATUS_PENDING, order_id],
+        [str(telegram_id), str(event_id), _now(), SIGNUP_STATUS_PENDING, order_id, str(quantity)],
         value_input_option="RAW",
     )
     _invalidate_sheet_cache(SHEET_SIGNUPS)
@@ -285,16 +300,18 @@ def set_signup_status(order_id: str, status: str) -> bool:
 
 
 def list_attendees(event_id) -> list:
-    """ФИО всех, кто оплатил событие (по данным листов Записи + Пользователи)."""
+    """ФИО всех, кто оплатил событие (по данным листов Записи + Пользователи).
+    quantity — сколько билетов купил именно этот человек (для подсчёта общего
+    числа мест на событие, а не только числа зарегистрировавшихся)."""
     signups_ws = get_worksheet(SHEET_SIGNUPS)
     _, signup_rows = _rows_with_index(signups_ws)
-    attendee_ids = [
-        str(record.get("telegram_id", ""))
+    attendee_entries = [
+        (str(record.get("telegram_id", "")), record.get("Количество"))
         for _, record in signup_rows
         if str(record.get("ID события", "")) == str(event_id)
         and record.get("Статус") == SIGNUP_STATUS_PAID
     ]
-    if not attendee_ids:
+    if not attendee_entries:
         return []
 
     users_ws = get_worksheet(SHEET_USERS)
@@ -302,13 +319,17 @@ def list_attendees(event_id) -> list:
     users_by_id = {str(record.get("telegram_id", "")): record for _, record in user_rows}
 
     attendees = []
-    for telegram_id in attendee_ids:
+    for telegram_id, raw_quantity in attendee_entries:
         user = users_by_id.get(telegram_id)
         if not user:
             continue
+        try:
+            quantity = int(raw_quantity or 1)
+        except ValueError:
+            quantity = 1
         first_sphere = (user.get("Сфера", "") or "").split(",")[0].strip()
         niche = " · ".join(part for part in (first_sphere, user.get("Компания/Проект", "")) if part)
-        attendees.append({"fio": user.get("ФИО", ""), "niche": niche})
+        attendees.append({"fio": user.get("ФИО", ""), "niche": niche, "quantity": quantity})
     return attendees
 
 

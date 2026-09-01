@@ -9,8 +9,9 @@
     },
     {
       "name": "banya-devtest",
-      "url": "http://localhost:5050",
-      "port": 5050
+      "runtimeExecutable": "E:\\Banya\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["scripts/run_devtest.py"],
+      "port": 5051
     }
   ]
 }

@@ -9,7 +9,13 @@ import sheets_client as sheets
 import telegram_auth
 import webhook_client
 from config import Config
-from constants import ONBOARDING_STEPS, SIGNUP_STATUS_FAILED, SIGNUP_STATUS_PAID, STATUS_ACTIVE
+from constants import (
+    MAX_TICKETS_PER_SIGNUP,
+    ONBOARDING_STEPS,
+    SIGNUP_STATUS_FAILED,
+    SIGNUP_STATUS_PAID,
+    STATUS_ACTIVE,
+)
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
@@ -248,7 +254,7 @@ def salebot_webhook():
     return jsonify({"status": "ok"})
 
 
-def _public_event(e: dict, is_registered: bool, can_signup: bool) -> dict:
+def _public_event(e: dict, is_registered: bool, can_signup: bool, registered_quantity: int = 0) -> dict:
     return {
         "id": e["id"],
         "title": e.get("Название", ""),
@@ -260,6 +266,8 @@ def _public_event(e: dict, is_registered: bool, can_signup: bool) -> dict:
         "photo": e.get("Фото", ""),
         "is_registered": is_registered,
         "can_signup": can_signup,
+        "registered_quantity": registered_quantity,
+        "max_tickets": MAX_TICKETS_PER_SIGNUP,
     }
 
 
@@ -274,9 +282,17 @@ def events():
 
     events_list = sheets.list_events()
     signups = sheets.list_signups_for_user(telegram_id)
-    signed_ids = {str(s.get("ID события")) for s in signups}
+    quantity_by_event = {}
+    for s in signups:
+        try:
+            quantity_by_event[str(s.get("ID события"))] = int(s.get("Количество") or 1)
+        except ValueError:
+            quantity_by_event[str(s.get("ID события"))] = 1
 
-    result = [_public_event(e, str(e["id"]) in signed_ids, can_signup) for e in events_list]
+    result = [
+        _public_event(e, str(e["id"]) in quantity_by_event, can_signup, quantity_by_event.get(str(e["id"]), 0))
+        for e in events_list
+    ]
     return jsonify({"events": result})
 
 
@@ -292,11 +308,12 @@ def event_detail(event_id):
 
     user = sheets.find_user(telegram_id)
     attendees = sheets.list_attendees(event_id)
+    registered_quantity = sheets.get_signup_quantity(telegram_id, event_id)
     return jsonify(
         {
-            "event": _public_event(event, sheets.is_signed_up(telegram_id, event_id), _is_active(user)),
+            "event": _public_event(event, registered_quantity > 0, _is_active(user), registered_quantity),
             "attendees": attendees,
-            "attendees_count": len(attendees),
+            "attendees_count": sum(a.get("quantity", 1) for a in attendees),
         }
     )
 
@@ -320,12 +337,20 @@ def event_signup(event_id):
     if sheets.is_signed_up(telegram_id, event_id):
         return jsonify({"error": "already_registered"}), 400
 
+    data = request.get_json(silent=True) or {}
+    try:
+        quantity = int(data.get("quantity", 1))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_quantity"}), 400
+    if not 1 <= quantity <= MAX_TICKETS_PER_SIGNUP:
+        return jsonify({"error": "invalid_quantity"}), 400
+
     price = _parse_price_rub(event.get("Цена", ""))
     if price <= 0:
         return jsonify({"error": "price_not_set"}), 400
 
     order_id = f"{event_id}-{telegram_id}-{int(time.time())}"
-    sheets.create_pending_signup(telegram_id, event_id, order_id)
+    sheets.create_pending_signup(telegram_id, event_id, order_id, quantity)
 
     notification_url = request.url_root.rstrip("/") + "/api/webhooks/prodamus"
     try:
@@ -334,6 +359,7 @@ def event_signup(event_id):
             title=event.get("Название", "") or "Участие в мероприятии",
             price=price,
             notification_url=notification_url,
+            quantity=quantity,
             customer_phone=_normalize_phone(user.get("Телефон", "")),
             customer_extra=f"telegram_id={telegram_id}",
         )
@@ -404,12 +430,17 @@ def profile():
         event = events_by_id.get(str(signup.get("ID события")))
         if not event:
             continue
+        try:
+            quantity = int(signup.get("Количество") or 1)
+        except ValueError:
+            quantity = 1
         item = {
             "id": event["id"],
             "title": event.get("Название", ""),
             "date": event.get("Дата", ""),
             "time": event.get("Время", ""),
             "place": event.get("Место", ""),
+            "quantity": quantity,
         }
         event_date = _parse_date(event.get("Дата", ""))
         if event_date and event_date < today:

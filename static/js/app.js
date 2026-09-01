@@ -186,7 +186,10 @@
   function eventActionHtml(e, opts) {
     const sticky = !!(opts && opts.sticky);
     const st = eventActionState(e);
-    if (st === "joined") return `<div class="state-btn state-joined"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="#8CB169" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Вы записаны</div>`;
+    if (st === "joined") {
+      const qtyLabel = e.registered_quantity > 1 ? ` · ${e.registered_quantity} билета` : "";
+      return `<div class="state-btn state-joined"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="#8CB169" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Вы записаны${qtyLabel}</div>`;
+    }
     if (st === "locked") return `<div class="state-btn state-locked"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="2" stroke="#99A49E" stroke-width="1.5"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="#99A49E" stroke-width="1.5"/></svg>Только для активных</div>`;
     if (st === "attended") return `<div class="state-btn state-attended">Вы посетили</div>`;
     if (st === "join") {
@@ -522,6 +525,17 @@
   document.getElementById("pay-overlay").addEventListener("click", (e) => {
     if (e.target.closest('[data-action="pay-close"]')) { closePayment(); return; }
     if (e.target.closest('[data-action="pay-agree"]')) { state.pay.agree = !state.pay.agree; renderPaymentSheet(); return; }
+    if (e.target.closest('[data-action="pay-qty-dec"]')) {
+      state.pay.quantity = Math.max(1, (state.pay.quantity || 1) - 1);
+      renderPaymentSheet();
+      return;
+    }
+    if (e.target.closest('[data-action="pay-qty-inc"]')) {
+      const max = (state.pay.event && state.pay.event.max_tickets) || 4;
+      state.pay.quantity = Math.min(max, (state.pay.quantity || 1) + 1);
+      renderPaymentSheet();
+      return;
+    }
     if (e.target.closest('[data-action="pay-submit"]')) { paySubmit(); return; }
     if (e.target.closest('[data-action="pay-retry"]')) { paySubmit(); return; }
   });
@@ -918,8 +932,19 @@
     return (list && list.find((e) => String(e.id) === idStr)) || null;
   }
 
+  function parsePriceRub(priceStr) {
+    if (!priceStr) return 0;
+    const cleaned = String(priceStr).replace(/[^\d,.]/g, "").replace(",", ".");
+    const num = parseFloat(cleaned);
+    return Number.isFinite(num) ? num : 0;
+  }
+
+  function formatPriceRub(num) {
+    return `${Math.round(num).toLocaleString("ru-RU")} ₽`;
+  }
+
   async function openPayment(id) {
-    state.pay = { eventId: id, phase: "form", agree: false, event: findCachedEvent(id) };
+    state.pay = { eventId: id, phase: "form", agree: false, quantity: 1, event: findCachedEvent(id) };
     document.getElementById("pay-overlay").hidden = false;
     renderPaymentSheet();
     if (!state.pay.event) {
@@ -937,7 +962,7 @@
 
   function closePayment() {
     document.getElementById("pay-overlay").hidden = true;
-    state.pay = { eventId: null, phase: "form", agree: false };
+    state.pay = { eventId: null, phase: "form", agree: false, quantity: 1 };
   }
 
   function renderPaymentSheet() {
@@ -945,6 +970,10 @@
     const p = state.pay;
     const e = p.event ? withDate(p.event) : null;
     const price = e ? e.price || "" : "";
+    const unitPrice = parsePriceRub(price);
+    const maxTickets = (e && e.max_tickets) || 4;
+    const qty = p.quantity || 1;
+    const total = unitPrice * qty;
 
     if (p.phase === "form") {
       const rows = e
@@ -957,12 +986,20 @@
       body.innerHTML = `
         <div class="pay-title">Оплата участия</div>
         <div class="pay-rows">${rows.map((r) => `<div class="pay-row"><span>${escapeHtml(r.label)}</span><span>${escapeHtml(r.value || "—")}</span></div>`).join("")}</div>
-        <div class="pay-total"><span>К оплате</span><span class="amount">${escapeHtml(price || "—")}</span></div>
+        <div class="pay-qty">
+          <span>Количество билетов</span>
+          <div class="pay-qty-stepper">
+            <button type="button" class="pay-qty-btn" data-action="pay-qty-dec" ${qty <= 1 ? "disabled" : ""} aria-label="Меньше">−</button>
+            <span class="pay-qty-value">${qty}</span>
+            <button type="button" class="pay-qty-btn" data-action="pay-qty-inc" ${qty >= maxTickets ? "disabled" : ""} aria-label="Больше">+</button>
+          </div>
+        </div>
+        <div class="pay-total"><span>К оплате</span><span class="amount">${unitPrice ? formatPriceRub(total) : "—"}</span></div>
         <button type="button" class="pay-agree" data-action="pay-agree">
           <span class="pay-check${p.agree ? " checked" : ""}">${p.agree ? '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="#213902" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' : ""}</span>
           <span>Согласен с условиями участия и офертой Банного Ордена</span>
         </button>
-        <button type="button" class="btn-primary" data-action="pay-submit" style="margin-top:12px" ${p.agree ? "" : "disabled"}>Перейти к оплате${price ? " · " + escapeHtml(price) : ""}</button>
+        <button type="button" class="btn-primary" data-action="pay-submit" style="margin-top:12px" ${p.agree ? "" : "disabled"}>Перейти к оплате${unitPrice ? " · " + formatPriceRub(total) : ""}</button>
         <div class="pay-secure">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="2" stroke="#99A49E" stroke-width="1.4"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="#99A49E" stroke-width="1.4"/></svg>
           Оплата через Продамус · защищённое соединение
@@ -990,7 +1027,7 @@
     p.phase = "redirect";
     renderPaymentSheet();
     try {
-      const data = await api(`/events/${p.eventId}/signup`, { method: "POST" });
+      const data = await api(`/events/${p.eventId}/signup`, { method: "POST", body: { quantity: p.quantity || 1 } });
       if (state.pay.eventId !== p.eventId) return;
       if (tg && tg.openLink) tg.openLink(data.payment_url);
       else window.location.href = data.payment_url;
