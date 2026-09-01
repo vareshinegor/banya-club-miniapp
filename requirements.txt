@@ -2,3 +2,6 @@ Flask==3.0.3
 gspread==6.1.2
 google-auth==2.32.0
 python-dotenv==1.0.1
+requests==2.34.2
+prodamuspy==1.0.2
+gunicorn==23.0.0

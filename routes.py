@@ -1,15 +1,24 @@
+import re
+import time
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request, session
 
+import prodamus_client
 import sheets_client as sheets
 import telegram_auth
+import webhook_client
 from config import Config
-from constants import ONBOARDING_STEPS, STATUS_ACTIVE
+from constants import ONBOARDING_STEPS, SIGNUP_STATUS_FAILED, SIGNUP_STATUS_PAID, STATUS_ACTIVE
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
 _STEPS_BY_KEY = {step["key"]: step for step in ONBOARDING_STEPS}
+
+_MONTHS_RU_NOM = [
+    "январь", "февраль", "март", "апрель", "май", "июнь",
+    "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+]
 
 
 def _current_telegram_id():
@@ -22,11 +31,25 @@ def _is_active(user) -> bool:
     return (user.get("Статус") or "").strip().casefold() == STATUS_ACTIVE.casefold()
 
 
+def _format_since(registered_at: str) -> str:
+    if not registered_at:
+        return ""
+    try:
+        dt = datetime.strptime(registered_at.strip()[:10], "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return f"{_MONTHS_RU_NOM[dt.month - 1]} {dt.year}"
+
+
 def _public_user(user: dict) -> dict:
     return {
         "fio": user.get("ФИО", ""),
         "dob": user.get("Дата рождения", ""),
         "company": user.get("Компания/Проект", ""),
+        "position": user.get("Должность", ""),
+        "city": user.get("Город", ""),
+        "phone": user.get("Телефон", ""),
+        "telegram_username": user.get("username", ""),
         "sphere": user.get("Сфера", ""),
         "role": user.get("Роль", ""),
         "request": user.get("Запрос", ""),
@@ -34,6 +57,7 @@ def _public_user(user: dict) -> dict:
         "source": user.get("Как узнал", ""),
         "status": user.get("Статус", ""),
         "is_active": _is_active(user),
+        "since": _format_since(user.get("Дата регистрации", "")),
     }
 
 
@@ -63,6 +87,24 @@ def _resolve_multi_labels(step_key: str, values, other_text: str) -> str:
         return ""
     labels = [_resolve_option_label(step_key, v, other_text) for v in values]
     return ", ".join(label for label in labels if label)
+
+
+def _parse_price_rub(price_str: str) -> float:
+    """"8 500 ₽" -> 8500.0. Возвращает 0 если цену не удалось распознать."""
+    if not price_str:
+        return 0.0
+    cleaned = re.sub(r"[^\d,.]", "", price_str).replace(",", ".")
+    try:
+        return float(cleaned) if cleaned else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _normalize_phone(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    return digits
 
 
 @api.route("/auth", methods=["POST"])
@@ -105,33 +147,105 @@ def register():
         return jsonify({"error": "already_registered"}), 400
 
     data = request.get_json(silent=True) or {}
-    fio = (data.get("fio") or "").strip()
-    dob = (data.get("dob") or "").strip()
-    company = (data.get("company") or "").strip()
-    sphere_values = data.get("sphere") or []
-    sphere_other = data.get("sphere_other", "")
-    role_value = data.get("role")
-    role_other = data.get("role_other", "")
-    request_values = data.get("request") or []
-    offer = (data.get("offer") or "").strip()
-    source_value = data.get("source")
-    source_other = data.get("source_other", "")
-    referrer = (data.get("referrer") or "").strip()
+    field_values = {}
+    missing = False
 
-    if not (fio and dob and company and sphere_values and role_value and request_values and offer and source_value):
+    for step in ONBOARDING_STEPS:
+        key = step["key"]
+
+        if step["type"] == "text":
+            value = (data.get(key) or "").strip()
+            if step.get("required") and not value:
+                missing = True
+            field_values[step["header"]] = value
+
+        elif step["type"] == "fields":
+            for f in step["fields"]:
+                value = (data.get(f["key"]) or "").strip()
+                if f.get("required") and not value:
+                    missing = True
+                field_values[f["header"]] = value
+
+        elif step["type"] == "select":
+            value = data.get(key)
+            other = data.get(f"{key}_other", "")
+            if step.get("required") and not value:
+                missing = True
+            elif value == "other" and not (other or "").strip():
+                missing = True
+            label = _resolve_option_label(key, value, other) if value else ""
+            if key == "source" and value == "recommendation":
+                referrer = (data.get("referrer") or "").strip()
+                if referrer:
+                    label = f"{label} ({referrer})"
+            field_values[step["header"]] = label
+
+        elif step["type"] == "multiselect":
+            values = data.get(key) or []
+            other = data.get(f"{key}_other", "")
+            if step.get("required") and not values:
+                missing = True
+            elif "other" in values and not (other or "").strip():
+                missing = True
+            field_values[step["header"]] = _resolve_multi_labels(key, values, other)
+
+    if missing:
         return jsonify({"error": "missing_fields"}), 400
 
-    sphere = _resolve_multi_labels("sphere", sphere_values, sphere_other)
-    role = _resolve_option_label("role", role_value, role_other)
-    request_text = _resolve_multi_labels("request", request_values, "")
-    source = _resolve_option_label("source", source_value, source_other)
-    if source_value == "recommendation" and referrer:
-        source = f"{source} ({referrer})"
+    sb_id = sheets.find_platform_id(telegram_id) or ""
+    sheets.create_user(telegram_id, session.get("username"), sb_id, field_values)
 
-    sheets.create_user(telegram_id, session.get("username"), fio, dob, company, sphere, role, request_text, offer, source)
+    try:
+        # Схема ключей задана стороной vakas-tools — менять только по согласованию с ними.
+        webhook_client.send_application({
+            "ss_id": sb_id,
+            "client_id": sb_id,
+            "name": field_values.get("ФИО", ""),
+            "phone": field_values.get("Телефон", ""),
+            "email": "",
+            "utm_source": "",
+            "utm_medium": "",
+            "utm_campaign": "",
+            "birthday": field_values.get("Дата рождения", ""),
+            "company": field_values.get("Компания/Проект", ""),
+            "dohod": field_values.get("Доход", ""),
+            "impact": field_values.get("Предложение", ""),
+            "nisha": field_values.get("Сфера", ""),
+            "zapros": field_values.get("Запрос", ""),
+            "rolework": field_values.get("Роль", ""),
+            "otkuda": field_values.get("Как узнал", ""),
+            "phio": field_values.get("ФИО", ""),
+            "import": "update",
+        })
+    except Exception as exc:  # вебхук недоступен/не настроен — заявка в клуб всё равно должна пройти
+        print(f"[webhook] не удалось отправить заявку: {exc}")
 
     user = sheets.find_user(telegram_id)
     return jsonify({"status": "active", "user": _public_user(user)})
+
+
+@api.route("/webhooks/salebot", methods=["POST"])
+def salebot_webhook():
+    """Входящий вебхук от сейлбота. Не требует Telegram-сессии — это серверный
+    вызов от другого бота, а не от мини-аппа.
+
+    В реальных запросах от salebot их поле "telegram_id" всегда пустое, а
+    telegram-id пользователя приходит в поле "platform_id"; их собственный
+    внутренний ID клиента (наш sb_id) приходит в поле "client_id". Оставляем
+    также поддержку "телеграм_id"/"platform_id" как sb_id на случай, если
+    salebot когда-нибудь начнёт слать поля правильно названными."""
+    secret = Config.INCOMING_WEBHOOK_SECRET
+    if secret and request.args.get("token") != secret:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    telegram_id = data.get("platform_id") or data.get("telegram_id")
+    sb_id = data.get("client_id") or data.get("sb_id")
+    if not telegram_id or not sb_id:
+        return jsonify({"error": "missing_fields"}), 400
+
+    sheets.save_platform_id(telegram_id, sb_id)
+    return jsonify({"status": "ok"})
 
 
 def _public_event(e: dict, is_registered: bool, can_signup: bool) -> dict:
@@ -189,6 +303,9 @@ def event_detail(event_id):
 
 @api.route("/events/<int:event_id>/signup", methods=["POST"])
 def event_signup(event_id):
+    """Не записывает сразу — создаёт запись со статусом "ожидает оплаты" и
+    возвращает ссылку на оплату Продамуса. Реальной записью (is_signed_up)
+    это становится только после вебхука с подтверждением платежа."""
     telegram_id = _current_telegram_id()
     if not telegram_id:
         return jsonify({"error": "unauthorized"}), 401
@@ -203,7 +320,47 @@ def event_signup(event_id):
     if sheets.is_signed_up(telegram_id, event_id):
         return jsonify({"error": "already_registered"}), 400
 
-    sheets.add_signup(telegram_id, event_id)
+    price = _parse_price_rub(event.get("Цена", ""))
+    if price <= 0:
+        return jsonify({"error": "price_not_set"}), 400
+
+    order_id = f"{event_id}-{telegram_id}-{int(time.time())}"
+    sheets.create_pending_signup(telegram_id, event_id, order_id)
+
+    notification_url = request.url_root.rstrip("/") + "/api/webhooks/prodamus"
+    try:
+        payment_url = prodamus_client.create_payment_link(
+            order_id=order_id,
+            title=event.get("Название", "") or "Участие в мероприятии",
+            price=price,
+            notification_url=notification_url,
+            customer_phone=_normalize_phone(user.get("Телефон", "")),
+            customer_extra=f"telegram_id={telegram_id}",
+        )
+    except RuntimeError as exc:
+        return jsonify({"error": "payment_not_configured", "message": str(exc)}), 500
+
+    return jsonify({"status": "ok", "payment_url": payment_url})
+
+
+@api.route("/webhooks/prodamus", methods=["POST"])
+def prodamus_webhook():
+    """Подтверждение оплаты от Продамуса. Переход пользователя по urlSuccess
+    подтверждением НЕ является — считаем оплаченным только по валидно
+    подписанному вебхуку (см. prodamus_client.py)."""
+    raw_body = request.get_data(as_text=True)
+    signature = request.headers.get("Sign", "")
+    payload = prodamus_client.parse_webhook_body(raw_body)
+
+    if not prodamus_client.verify_webhook(payload, signature):
+        return jsonify({"error": "invalid_signature"}), 400
+
+    order_id = payload.get("order_num") or payload.get("order_id")
+    if not order_id:
+        return jsonify({"error": "missing_order_id"}), 400
+
+    status = SIGNUP_STATUS_PAID if payload.get("payment_status") == "success" else SIGNUP_STATUS_FAILED
+    sheets.set_signup_status(order_id, status)
     return jsonify({"status": "ok"})
 
 
@@ -251,6 +408,7 @@ def profile():
             "id": event["id"],
             "title": event.get("Название", ""),
             "date": event.get("Дата", ""),
+            "time": event.get("Время", ""),
             "place": event.get("Место", ""),
         }
         event_date = _parse_date(event.get("Дата", ""))

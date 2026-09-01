@@ -1,3 +1,6 @@
+import json
+import threading
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -8,11 +11,15 @@ from config import Config
 from constants import (
     SHEET_ACHIEVEMENTS,
     SHEET_EVENTS,
+    SHEET_GENERAL,
     SHEET_MATERIALS,
     SHEET_SIGNUPS,
     SHEET_USERS,
     SIGNUP_STATUS_PAID,
+    SIGNUP_STATUS_PENDING,
+    SIGNUPS_HEADERS,
     STATUS_INACTIVE,
+    USERS_HEADERS,
 )
 
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -20,20 +27,47 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _client = None
 _spreadsheet = None
 _worksheets_by_name = {}
+# RLock, а не Lock: get_worksheet -> get_spreadsheet -> get_client вложенно
+# берут одну и ту же блокировку из одного потока — обычный Lock тут
+# самозаблокировался бы намертво.
+_init_lock = threading.RLock()
+
+# Каждый round-trip к Google Sheets — от 600мс до нескольких секунд, а один
+# заход на Главную дёргает 4-5 таких чтений (в т.ч. один и тот же лист
+# "Пользователи" — в /api/auth и потом ещё раз в /api/events). Кэшируем
+# содержимое листа на несколько секунд: этого достаточно, чтобы схлопнуть все
+# чтения одного запроса/перехода по вкладкам в один реальный вызов к API, но
+# админ, поменявший что-то в таблице руками, увидит изменения почти сразу.
+_SHEET_CACHE_TTL = 8
+_sheet_cache = {}
+
+
+def _invalidate_sheet_cache(name: str):
+    _sheet_cache.pop(name, None)
 
 
 def get_client():
     global _client
     if _client is None:
-        creds = Credentials.from_service_account_file(Config.GOOGLE_CREDENTIALS_FILE, scopes=_SCOPES)
-        _client = gspread.authorize(creds)
+        # Flask работает с threaded=True — без блокировки два одновременных
+        # первых запроса могли бы параллельно логиниться в Google по второму разу.
+        with _init_lock:
+            if _client is None:
+                if Config.GOOGLE_CREDENTIALS_JSON:
+                    info = json.loads(Config.GOOGLE_CREDENTIALS_JSON)
+                    creds = Credentials.from_service_account_info(info, scopes=_SCOPES)
+                else:
+                    creds = Credentials.from_service_account_file(Config.GOOGLE_CREDENTIALS_FILE, scopes=_SCOPES)
+                _client = gspread.authorize(creds)
     return _client
 
 
 def get_spreadsheet():
     global _spreadsheet
     if _spreadsheet is None:
-        _spreadsheet = get_client().open_by_key(Config.GOOGLE_SHEETS_ID)
+        with _init_lock:
+            if _spreadsheet is None:
+                _spreadsheet = get_client().open_by_key(Config.GOOGLE_SHEETS_ID)
     return _spreadsheet
 
 
@@ -41,13 +75,21 @@ def get_worksheet(name: str):
     # worksheet(name) would otherwise re-fetch sheet metadata on every single call
     # (an extra Sheets API round trip each time) — cache the handle per process.
     if name not in _worksheets_by_name:
-        _worksheets_by_name[name] = get_spreadsheet().worksheet(name)
+        with _init_lock:
+            if name not in _worksheets_by_name:
+                _worksheets_by_name[name] = get_spreadsheet().worksheet(name)
     return _worksheets_by_name[name]
 
 
 def _rows_with_index(ws):
     """Return (headers, [(row_number, record_dict), ...]) skipping the header row."""
-    values = ws.get_all_values()
+    cached = _sheet_cache.get(ws.title)
+    now = time.monotonic()
+    if cached and now - cached[0] < _SHEET_CACHE_TTL:
+        values = cached[1]
+    else:
+        values = ws.get_all_values()
+        _sheet_cache[ws.title] = (now, values)
     if not values:
         return [], []
     headers = values[0]
@@ -75,25 +117,53 @@ def find_user(telegram_id) -> Optional[dict]:
     return None
 
 
-def create_user(telegram_id, username, fio, dob, company, sphere, role, request_text, offer, source):
+def create_user(telegram_id, username, sb_id, fields: dict):
+    """fields: {header_name: value} for any subset of USERS_HEADERS. telegram_id,
+    username, sb_id, Статус и Дата регистрации проставляются здесь автоматически."""
     ws = get_worksheet(SHEET_USERS)
-    ws.append_row(
-        [
-            str(telegram_id),
-            username or "",
-            fio,
-            dob,
-            company,
-            sphere,
-            role,
-            request_text,
-            offer,
-            source,
-            STATUS_INACTIVE,
-            _now(),
-        ],
-        value_input_option="RAW",
-    )
+    row = []
+    for header in USERS_HEADERS:
+        if header == "telegram_id":
+            row.append(str(telegram_id))
+        elif header == "username":
+            row.append(username or "")
+        elif header == "sb_id":
+            row.append(sb_id or "")
+        elif header == "Статус":
+            row.append(STATUS_INACTIVE)
+        elif header == "Дата регистрации":
+            row.append(_now())
+        else:
+            row.append(fields.get(header, ""))
+    ws.append_row(row, value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_USERS)
+
+
+# --- Общие (данные от сейлбота) --------------------------------------------
+
+
+def save_platform_id(telegram_id, platform_id):
+    """Апсерт связки telegram_id -> platform_id в лист "Общие"."""
+    ws = get_worksheet(SHEET_GENERAL)
+    headers, rows = _rows_with_index(ws)
+    for row_number, record in rows:
+        if str(record.get("telegram_id", "")) == str(telegram_id):
+            col_map = {h: i + 1 for i, h in enumerate(headers)}
+            ws.update_cell(row_number, col_map["platform_id"], str(platform_id))
+            ws.update_cell(row_number, col_map["Дата получения"], _now())
+            _invalidate_sheet_cache(SHEET_GENERAL)
+            return
+    ws.append_row([str(telegram_id), str(platform_id), _now()], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_GENERAL)
+
+
+def find_platform_id(telegram_id) -> Optional[str]:
+    ws = get_worksheet(SHEET_GENERAL)
+    _, rows = _rows_with_index(ws)
+    for _, record in rows:
+        if str(record.get("telegram_id", "")) == str(telegram_id):
+            return record.get("platform_id", "")
+    return None
 
 
 # --- Афиша --------------------------------------------------------------
@@ -115,14 +185,18 @@ def list_events() -> list:
             max_id = max(max_id, int(raw_id))
 
     events = []
+    backfilled = False
     for row_number, record in active_rows:
         raw_id = (record.get("ID") or "").strip()
         if not raw_id:
             max_id += 1
             raw_id = str(max_id)
             ws.update_cell(row_number, 1, raw_id)
+            backfilled = True
         record["id"] = raw_id
         events.append(record)
+    if backfilled:
+        _invalidate_sheet_cache(SHEET_EVENTS)
     return events
 
 
@@ -135,12 +209,23 @@ def get_event(event_id) -> Optional[dict]:
 
 
 # --- Записи на мероприятия ----------------------------------------------
+#
+# Статус записи проходит путь "ожидает оплаты" -> "оплачено"/"отклонено".
+# Строка создаётся (или переиспользуется) в момент формирования ссылки на
+# оплату Продамуса, ДО того как пользователь реально заплатил — и только
+# вебхук с валидной подписью переводит её в "оплачено". Пользователю
+# запись/список показываем только когда она реально оплачена.
 
 
 def list_signups_for_user(telegram_id) -> list:
+    """Только оплаченные записи — то, что видит сам пользователь."""
     ws = get_worksheet(SHEET_SIGNUPS)
     _, rows = _rows_with_index(ws)
-    return [record for _, record in rows if str(record.get("telegram_id", "")) == str(telegram_id)]
+    return [
+        record for _, record in rows
+        if str(record.get("telegram_id", "")) == str(telegram_id)
+        and record.get("Статус") == SIGNUP_STATUS_PAID
+    ]
 
 
 def is_signed_up(telegram_id, event_id) -> bool:
@@ -148,22 +233,66 @@ def is_signed_up(telegram_id, event_id) -> bool:
     return any(str(s.get("ID события")) == str(event_id) for s in signups)
 
 
-def add_signup(telegram_id, event_id):
+def create_pending_signup(telegram_id, event_id, order_id: str):
+    """Создаёт (или переиспользует существующую неоплаченную) строку записи
+    со статусом "ожидает оплаты" перед тем, как отправить пользователя на
+    оплату — чтобы повторные попытки не плодили дубли строк."""
     ws = get_worksheet(SHEET_SIGNUPS)
+    _, rows = _rows_with_index(ws)
+    for row_number, record in rows:
+        if (
+            str(record.get("telegram_id", "")) == str(telegram_id)
+            and str(record.get("ID события", "")) == str(event_id)
+            and record.get("Статус") != SIGNUP_STATUS_PAID
+        ):
+            col = SIGNUPS_HEADERS.index("Статус") + 1
+            order_col = SIGNUPS_HEADERS.index("Заказ") + 1
+            date_col = SIGNUPS_HEADERS.index("Дата записи") + 1
+            ws.update_cell(row_number, col, SIGNUP_STATUS_PENDING)
+            ws.update_cell(row_number, order_col, order_id)
+            ws.update_cell(row_number, date_col, _now())
+            _invalidate_sheet_cache(SHEET_SIGNUPS)
+            return
+
     ws.append_row(
-        [str(telegram_id), str(event_id), _now(), SIGNUP_STATUS_PAID],
+        [str(telegram_id), str(event_id), _now(), SIGNUP_STATUS_PENDING, order_id],
         value_input_option="RAW",
     )
+    _invalidate_sheet_cache(SHEET_SIGNUPS)
+
+
+def find_signup_by_order(order_id: str) -> Optional[dict]:
+    ws = get_worksheet(SHEET_SIGNUPS)
+    _, rows = _rows_with_index(ws)
+    for row_number, record in rows:
+        if record.get("Заказ") == order_id:
+            record["_row"] = row_number
+            return record
+    return None
+
+
+def set_signup_status(order_id: str, status: str) -> bool:
+    """Обновляет статус записи по order_id (из вебхука Продамуса).
+    Возвращает False, если строка с таким заказом не найдена."""
+    record = find_signup_by_order(order_id)
+    if not record:
+        return False
+    ws = get_worksheet(SHEET_SIGNUPS)
+    col = SIGNUPS_HEADERS.index("Статус") + 1
+    ws.update_cell(record["_row"], col, status)
+    _invalidate_sheet_cache(SHEET_SIGNUPS)
+    return True
 
 
 def list_attendees(event_id) -> list:
-    """ФИО всех, кто записан на событие (по данным листов Записи + Пользователи)."""
+    """ФИО всех, кто оплатил событие (по данным листов Записи + Пользователи)."""
     signups_ws = get_worksheet(SHEET_SIGNUPS)
     _, signup_rows = _rows_with_index(signups_ws)
     attendee_ids = [
         str(record.get("telegram_id", ""))
         for _, record in signup_rows
         if str(record.get("ID события", "")) == str(event_id)
+        and record.get("Статус") == SIGNUP_STATUS_PAID
     ]
     if not attendee_ids:
         return []
@@ -175,8 +304,11 @@ def list_attendees(event_id) -> list:
     attendees = []
     for telegram_id in attendee_ids:
         user = users_by_id.get(telegram_id)
-        if user:
-            attendees.append({"fio": user.get("ФИО", "")})
+        if not user:
+            continue
+        first_sphere = (user.get("Сфера", "") or "").split(",")[0].strip()
+        niche = " · ".join(part for part in (first_sphere, user.get("Компания/Проект", "")) if part)
+        attendees.append({"fio": user.get("ФИО", ""), "niche": niche})
     return attendees
 
 
