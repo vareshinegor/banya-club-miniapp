@@ -14,7 +14,8 @@ from constants import (
     ONBOARDING_STEPS,
     SIGNUP_STATUS_FAILED,
     SIGNUP_STATUS_PAID,
-    STATUS_ACTIVE,
+    STATUS_NON_RESIDENT,
+    STATUS_RESIDENT,
 )
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -31,10 +32,22 @@ def _current_telegram_id():
     return session.get("telegram_id")
 
 
-def _is_active(user) -> bool:
+def _membership_tier(user) -> str:
+    """"resident" (оплаченная подписка) / "non_resident" (анкета одобрена, без
+    подписки) / "pending" (анкета ещё не рассмотрена, либо статус пустой/
+    неизвестный — по умолчанию считаем самым ограниченным уровнем)."""
     if not user:
-        return False
-    return (user.get("Статус") or "").strip().casefold() == STATUS_ACTIVE.casefold()
+        return "pending"
+    status = (user.get("Статус") or "").strip().casefold()
+    if status == STATUS_RESIDENT.casefold():
+        return "resident"
+    if status == STATUS_NON_RESIDENT.casefold():
+        return "non_resident"
+    return "pending"
+
+
+def _can_signup(tier: str) -> bool:
+    return tier in ("resident", "non_resident")
 
 
 def _format_since(registered_at: str) -> str:
@@ -62,7 +75,7 @@ def _public_user(user: dict) -> dict:
         "offer": user.get("Предложение", ""),
         "source": user.get("Как узнал", ""),
         "status": user.get("Статус", ""),
-        "is_active": _is_active(user),
+        "status_tier": _membership_tier(user),
         "since": _format_since(user.get("Дата регистрации", "")),
     }
 
@@ -254,7 +267,38 @@ def salebot_webhook():
     return jsonify({"status": "ok"})
 
 
-def _public_event(e: dict, is_registered: bool, can_signup: bool, registered_quantity: int = 0) -> dict:
+@api.route("/webhooks/salebot/subscription", methods=["POST"])
+def salebot_subscription_webhook():
+    """Вебхук от salebot ПОСЛЕ того как человек реально оплатил подписку —
+    оплата подписки проходит на их стороне, не через наш Продамус (тот
+    оформляет только разовую оплату конкретной бани). Переводит пользователя
+    в STATUS_RESIDENT. Не требует Telegram-сессии — серверный вызов от salebot."""
+    secret = Config.INCOMING_WEBHOOK_SECRET
+    if secret and request.args.get("token") != secret:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    telegram_id = data.get("tg_id") or data.get("telegram_id") or data.get("platform_id")
+    sb_id = data.get("sb_id") or data.get("client_id") or ""
+    if not telegram_id:
+        return jsonify({"error": "missing_fields"}), 400
+
+    if not sheets.mark_subscription_paid(telegram_id, sb_id):
+        return jsonify({"error": "user_not_found"}), 404
+    return jsonify({"status": "ok"})
+
+
+def _event_price_for_tier(event: dict, tier: str) -> str:
+    """Нерезиденты видят "Цена нерезидент", если админ её заполнил — иначе
+    (как и резиденты) обычную "Цена"."""
+    if tier == "non_resident":
+        non_resident_price = (event.get("Цена нерезидент") or "").strip()
+        if non_resident_price:
+            return non_resident_price
+    return event.get("Цена", "")
+
+
+def _public_event(e: dict, is_registered: bool, can_signup: bool, tier: str, registered_quantity: int = 0) -> dict:
     return {
         "id": e["id"],
         "title": e.get("Название", ""),
@@ -262,7 +306,7 @@ def _public_event(e: dict, is_registered: bool, can_signup: bool, registered_qua
         "date": e.get("Дата", ""),
         "time": e.get("Время", ""),
         "place": e.get("Место", ""),
-        "price": e.get("Цена", ""),
+        "price": _event_price_for_tier(e, tier),
         "photo": e.get("Фото", ""),
         "is_registered": is_registered,
         "can_signup": can_signup,
@@ -278,7 +322,8 @@ def events():
         return jsonify({"error": "unauthorized"}), 401
 
     user = sheets.find_user(telegram_id)
-    can_signup = _is_active(user)
+    tier = _membership_tier(user)
+    can_signup = _can_signup(tier)
 
     events_list = sheets.list_events()
     signups = sheets.list_signups_for_user(telegram_id)
@@ -290,7 +335,7 @@ def events():
             quantity_by_event[str(s.get("ID события"))] = 1
 
     result = [
-        _public_event(e, str(e["id"]) in quantity_by_event, can_signup, quantity_by_event.get(str(e["id"]), 0))
+        _public_event(e, str(e["id"]) in quantity_by_event, can_signup, tier, quantity_by_event.get(str(e["id"]), 0))
         for e in events_list
     ]
     return jsonify({"events": result})
@@ -307,11 +352,12 @@ def event_detail(event_id):
         return jsonify({"error": "event_not_found"}), 404
 
     user = sheets.find_user(telegram_id)
+    tier = _membership_tier(user)
     attendees = sheets.list_attendees(event_id)
     registered_quantity = sheets.get_signup_quantity(telegram_id, event_id)
     return jsonify(
         {
-            "event": _public_event(event, registered_quantity > 0, _is_active(user), registered_quantity),
+            "event": _public_event(event, registered_quantity > 0, _can_signup(tier), tier, registered_quantity),
             "attendees": attendees,
             "attendees_count": sum(a.get("quantity", 1) for a in attendees),
         }
@@ -328,8 +374,9 @@ def event_signup(event_id):
         return jsonify({"error": "unauthorized"}), 401
 
     user = sheets.find_user(telegram_id)
-    if not _is_active(user):
-        return jsonify({"error": "inactive_member"}), 403
+    tier = _membership_tier(user)
+    if not _can_signup(tier):
+        return jsonify({"error": "pending_review"}), 403
 
     event = sheets.get_event(event_id)
     if not event:
@@ -345,7 +392,7 @@ def event_signup(event_id):
     if not 1 <= quantity <= MAX_TICKETS_PER_SIGNUP:
         return jsonify({"error": "invalid_quantity"}), 400
 
-    price = _parse_price_rub(event.get("Цена", ""))
+    price = _parse_price_rub(_event_price_for_tier(event, tier))
     if price <= 0:
         return jsonify({"error": "price_not_set"}), 400
 

@@ -18,7 +18,8 @@ from constants import (
     SIGNUP_STATUS_PAID,
     SIGNUP_STATUS_PENDING,
     SIGNUPS_HEADERS,
-    STATUS_INACTIVE,
+    STATUS_PENDING,
+    STATUS_RESIDENT,
     USERS_HEADERS,
 )
 
@@ -130,13 +131,32 @@ def create_user(telegram_id, username, sb_id, fields: dict):
         elif header == "sb_id":
             row.append(sb_id or "")
         elif header == "Статус":
-            row.append(STATUS_INACTIVE)
+            row.append(STATUS_PENDING)
         elif header == "Дата регистрации":
             row.append(_now())
         else:
             row.append(fields.get(header, ""))
     ws.append_row(row, value_input_option="RAW")
     _invalidate_sheet_cache(SHEET_USERS)
+
+
+def mark_subscription_paid(telegram_id, sb_id: str = "") -> bool:
+    """Подписка подтверждена вебхуком salebot (оплата проходит у них, не в
+    нашем Продамусе) — переводит пользователя в STATUS_RESIDENT. sb_id
+    дозаписывается только если в таблице это поле ещё пустое (не затираем
+    уже сохранённое значение). Возвращает False, если такого telegram_id нет
+    в листе "Пользователи" (например, вебхук пришёл раньше анкеты)."""
+    ws = get_worksheet(SHEET_USERS)
+    headers, rows = _rows_with_index(ws)
+    col_map = {h: i + 1 for i, h in enumerate(headers)}
+    for row_number, record in rows:
+        if str(record.get("telegram_id", "")) == str(telegram_id):
+            ws.update_cell(row_number, col_map["Статус"], STATUS_RESIDENT)
+            if sb_id and not (record.get("sb_id") or "").strip():
+                ws.update_cell(row_number, col_map["sb_id"], str(sb_id))
+            _invalidate_sheet_cache(SHEET_USERS)
+            return True
+    return False
 
 
 # --- Общие (данные от сейлбота) --------------------------------------------

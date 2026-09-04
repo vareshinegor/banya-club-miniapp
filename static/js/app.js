@@ -140,10 +140,14 @@
 
   // --- Общие блоки разметки ------------------------------------------------
 
+  function membershipBadgeHtml(tier) {
+    if (tier === "resident") return '<span class="badge badge-active">Резидент</span>';
+    if (tier === "non_resident") return '<span class="badge badge-warning">Нерезидент</span>';
+    return '<span class="badge badge-moderation">На модерации</span>';
+  }
+
   function pageHeaderHtml(title) {
-    const badge = state.user && state.user.is_active
-      ? '<span class="badge badge-active">Активный</span>'
-      : '<span class="badge badge-moderation">На модерации</span>';
+    const badge = membershipBadgeHtml(state.user && state.user.status_tier);
     return `<div class="page-header"><span class="page-title">${escapeHtml(title)}</span>${badge}</div>`;
   }
 
@@ -190,7 +194,7 @@
       const qtyLabel = e.registered_quantity > 1 ? ` · ${e.registered_quantity} билета` : "";
       return `<div class="state-btn state-joined"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="#8CB169" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Вы записаны${qtyLabel}</div>`;
     }
-    if (st === "locked") return `<div class="state-btn state-locked"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="2" stroke="#99A49E" stroke-width="1.5"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="#99A49E" stroke-width="1.5"/></svg>Только для активных</div>`;
+    if (st === "locked") return `<div class="state-btn state-locked"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="2" stroke="#99A49E" stroke-width="1.5"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="#99A49E" stroke-width="1.5"/></svg>Доступно после проверки анкеты</div>`;
     if (st === "attended") return `<div class="state-btn state-attended">Вы посетили</div>`;
     if (st === "join") {
       const label = sticky && e.price ? `Записаться · ${escapeHtml(e.price)}` : "Записаться";
@@ -554,7 +558,7 @@
       let html = `<div class="scroll-pad">`;
       html += `<div class="card-title" style="font-size:24px;line-height:1.1">Здравствуйте, ${escapeHtml((state.user.fio || "резидент").split(" ")[0])}</div>`;
       if (state.user.company) html += `<div class="profile-company">${escapeHtml(state.user.company)}</div>`;
-      if (!state.user.is_active) html += moderationNoticeHtml();
+      if (state.user.status_tier === "pending") html += moderationNoticeHtml();
 
       html += sectionLabelHtml("Ближайшее событие");
       html += next
@@ -811,9 +815,11 @@
         <div style="min-width:0">
           <div class="profile-name">${escapeHtml(u.fio)}</div>
           ${u.company ? `<div class="profile-company">${escapeHtml(u.company)}</div>` : ""}
-          ${u.is_active
-            ? '<span class="badge badge-active" style="display:inline-flex;margin-top:9px">Активный резидент</span>'
-            : '<span class="badge badge-moderation" style="display:inline-flex;margin-top:9px">На модерации</span>'}
+          ${u.status_tier === "resident"
+            ? '<span class="badge badge-active" style="display:inline-flex;margin-top:9px">Резидент</span>'
+            : u.status_tier === "non_resident"
+              ? '<span class="badge badge-warning" style="display:inline-flex;margin-top:9px">Нерезидент</span>'
+              : '<span class="badge badge-moderation" style="display:inline-flex;margin-top:9px">На модерации</span>'}
         </div>
       </div>`;
 
