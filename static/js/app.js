@@ -644,7 +644,11 @@
   }
 
   function eventCardHtml(e) {
+    const cover = e.photo
+      ? `<div class="card-cover"><img src="${escapeHtml(e.photo)}" alt="" loading="lazy" onerror="this.closest('.card-cover').remove()"></div>`
+      : "";
     return `<div class="card clickable" data-open-event="${e.id}">
+      ${cover}
       <div class="card-row">
         <div class="date-chip"><div class="day">${dayLabel(e._date)}</div><div class="month">${monthLabelShort(e._date)}</div></div>
         <div style="min-width:0;flex:1">

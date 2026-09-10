@@ -349,6 +349,20 @@ button, input, textarea {
   letter-spacing: -.01em;
 }
 
+.card-cover {
+  height: 120px;
+  margin: -16px -16px 12px;
+  border-radius: 16px 16px 0 0;
+  overflow: hidden;
+}
+
+.card-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 .card-row {
   display: flex;
   gap: 14px;
