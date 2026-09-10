@@ -192,6 +192,32 @@ def upload_avatar():
     return jsonify({"status": "ok", "url": _avatar_url(telegram_id)})
 
 
+@api.route("/admin/set-avatar", methods=["POST"])
+def admin_set_avatar():
+    """Ручная простановка аватара по telegram_id в обход анкеты — нужно для
+    резидентов, которые прошли регистрацию до того, как появился этот шаг
+    (у них нет способа сами загрузить фото). Тот же секрет, что и у вебхуков
+    salebot: ?token=<INCOMING_WEBHOOK_SECRET>."""
+    secret = Config.INCOMING_WEBHOOK_SECRET
+    if secret and request.args.get("token") != secret:
+        return jsonify({"error": "unauthorized"}), 401
+
+    telegram_id = request.form.get("telegram_id")
+    if not telegram_id:
+        return jsonify({"error": "missing_fields"}), 400
+
+    file = request.files.get("photo")
+    if not file or not file.filename:
+        return jsonify({"error": "no_file"}), 400
+
+    try:
+        avatar_client.save_avatar(telegram_id, file.stream)
+    except ValueError:
+        return jsonify({"error": "invalid_image"}), 400
+
+    return jsonify({"status": "ok", "url": _avatar_url(telegram_id)})
+
+
 @api.route("/register", methods=["POST"])
 def register():
     telegram_id = _current_telegram_id()
