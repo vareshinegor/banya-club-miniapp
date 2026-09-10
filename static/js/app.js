@@ -174,7 +174,7 @@
   function moderationNoticeHtml() {
     return `<div class="notice-moderation">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 4.5l8 14H4l8-14z" stroke="#C98A3C" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 10v3.5M12 16v.5" stroke="#C98A3C" stroke-width="1.7" stroke-linecap="round"/></svg>
-      <div><div class="title">Заявка на рассмотрении</div><div class="text">Совет Ордена подтверждает резидентство. Запись на бани откроется после решения.</div></div>
+      <div><div class="title">Заявка на рассмотрении</div><div class="text">Совет Ордена рассмотрит анкету в течение суток. Запись на бани откроется после решения.</div></div>
     </div>`;
   }
 
