@@ -556,7 +556,7 @@
       const next = upcoming[0];
 
       let html = `<div class="scroll-pad">`;
-      html += `<div class="card-title" style="font-size:24px;line-height:1.1">Здравствуйте, ${escapeHtml((state.user.fio || "резидент").split(" ")[0])}</div>`;
+      html += `<div class="card-title" style="font-size:24px;line-height:1.1">Здравствуйте, ${escapeHtml((state.user.fio || "резидент").split(" ").slice(0, 2).join(" "))}</div>`;
       if (state.user.company) html += `<div class="profile-company">${escapeHtml(state.user.company)}</div>`;
       if (state.user.status_tier === "pending") html += moderationNoticeHtml();
 

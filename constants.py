@@ -116,7 +116,7 @@ ONBOARDING_STEPS = [
         "required": True,
         "options": [
             {"value": "construction", "label": "🏗️ Строительство"},
-            {"value": "production_trade", "label": "🏭 Производство / Торговля"},
+            {"value": "production", "label": "🏭 Производство"},
             {"value": "development", "label": "🏢 Девелопмент"},
             {"value": "investments", "label": "📈 Инвестиции"},
             {"value": "it", "label": "💻 IT / Технологии"},
