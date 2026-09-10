@@ -685,35 +685,47 @@ button, input, textarea {
   color: var(--highlight-ink);
   padding: 18px;
   cursor: pointer;
+  background-size: cover;
+  background-position: center;
 }
 
 .next-card:active {
-  background: #DFDCD4;
+  background-color: #DFDCD4;
 }
 
-.next-card .date-chip {
+.next-card.has-photo {
+  background-color: transparent;
+  color: var(--text);
+}
+
+.next-card.has-photo:active {
+  background-color: transparent;
+  filter: brightness(.92);
+}
+
+.next-card:not(.has-photo) .date-chip {
   background: var(--bg);
   color: var(--text);
 }
 
-.next-card .card-meta {
+.next-card:not(.has-photo) .card-meta {
   color: var(--highlight-ink-soft);
 }
 
-.next-card .card-price {
+.next-card:not(.has-photo) .card-price {
   color: var(--highlight-ink);
 }
 
-.next-card .card-actions .state-join {
+.next-card:not(.has-photo) .card-actions .state-join {
   background: var(--bg);
   color: var(--text);
 }
 
-.next-card .card-actions .state-join:active {
+.next-card:not(.has-photo) .card-actions .state-join:active {
   background: #0F1714;
 }
 
-.next-card .card-actions .state-locked {
+.next-card:not(.has-photo) .card-actions .state-locked {
   background: rgba(32, 44, 39, .10);
   color: var(--highlight-ink-soft);
 }
