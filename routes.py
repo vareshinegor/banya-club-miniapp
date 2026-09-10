@@ -1,9 +1,11 @@
+import os
 import re
 import time
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request, session
 
+import avatar_client
 import prodamus_client
 import sheets_client as sheets
 import telegram_auth
@@ -60,6 +62,18 @@ def _format_since(registered_at: str) -> str:
     return f"{_MONTHS_RU_NOM[dt.month - 1]} {dt.year}"
 
 
+def _avatar_url(telegram_id) -> str:
+    """Пусто, если фото не загружено — фронтенд в этом случае рисует кружок
+    с инициалами. ?v=<mtime файла> нужен, чтобы Telegram WebView (агрессивно
+    кэширующий статику по URL) сразу подхватил новое фото после перезаливки."""
+    if not telegram_id:
+        return ""
+    path = avatar_client.avatar_path(telegram_id)
+    if not os.path.exists(path):
+        return ""
+    return f"/static/avatars/{telegram_id}.jpg?v={int(os.path.getmtime(path))}"
+
+
 def _public_user(user: dict) -> dict:
     return {
         "fio": user.get("ФИО", ""),
@@ -77,6 +91,7 @@ def _public_user(user: dict) -> dict:
         "status": user.get("Статус", ""),
         "status_tier": _membership_tier(user),
         "since": _format_since(user.get("Дата регистрации", "")),
+        "avatar_url": _avatar_url(user.get("telegram_id", "")),
     }
 
 
@@ -154,6 +169,27 @@ def auth():
 @api.route("/onboarding-config", methods=["GET"])
 def onboarding_config():
     return jsonify({"steps": ONBOARDING_STEPS})
+
+
+@api.route("/upload-avatar", methods=["POST"])
+def upload_avatar():
+    """Загрузка фото-аватара — шаг анкеты и (в будущем) профиль. Работает уже
+    после /api/auth и не требует, чтобы /api/register был вызван — файл
+    просто ложится в static/avatars/<telegram_id>.jpg."""
+    telegram_id = _current_telegram_id()
+    if not telegram_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    file = request.files.get("photo")
+    if not file or not file.filename:
+        return jsonify({"error": "no_file"}), 400
+
+    try:
+        avatar_client.save_avatar(telegram_id, file.stream)
+    except ValueError:
+        return jsonify({"error": "invalid_image"}), 400
+
+    return jsonify({"status": "ok", "url": _avatar_url(telegram_id)})
 
 
 @api.route("/register", methods=["POST"])

@@ -24,6 +24,11 @@ def create_app():
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax" if Config.DEV_MODE else "None"
     app.config["SESSION_COOKIE_SECURE"] = not Config.DEV_MODE
 
+    # Ограничение на загрузку фото-аватара — телефон может прислать HEIC на
+    # 15-20МБ, но не больше: Flask сам ответит 413 до того, как файл дойдёт
+    # до routes.py, если запрос крупнее.
+    app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
+
     app.register_blueprint(api)
 
     @app.after_request

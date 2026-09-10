@@ -278,6 +278,34 @@
     const nextBtn = document.getElementById("onb-next");
     if (nextBtn) nextBtn.disabled = !isOnbStepValid(currentOnbStep());
   });
+  document.getElementById("onb-body").addEventListener("change", (e) => {
+    const fileInput = e.target.closest("[data-onb-photo-input]");
+    if (!fileInput) return;
+    const file = fileInput.files[0];
+    if (file) uploadOnbAvatar(file);
+  });
+
+  async function uploadOnbAvatar(file) {
+    const a = state.onb.answers;
+    a.avatar_uploading = true;
+    a.avatar_uploaded = false;
+    a.avatar_error = "";
+    renderOnbStep();
+    try {
+      const fd = new FormData();
+      fd.append("photo", file);
+      const res = await fetch("/api/upload-avatar", { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "upload_failed");
+      a.avatar_uploaded = true;
+      a.avatar_preview = data.url;
+    } catch (err) {
+      a.avatar_error = "Не удалось загрузить фото — попробуйте другое.";
+    } finally {
+      a.avatar_uploading = false;
+      renderOnbStep();
+    }
+  }
 
   function currentOnbStep() { return state.onb.steps[state.onb.index]; }
 
@@ -306,6 +334,18 @@
           return `<div class="onb-field"><div class="onb-field-label">${escapeHtml(f.label)}</div><input type="text" id="onb-input-${f.key}" placeholder="${escapeHtml(f.placeholder || "")}" value="${escapeHtml(value)}"></div>`;
         })
         .join("");
+    } else if (step.type === "photo") {
+      const uploading = answers.avatar_uploading;
+      const uploaded = answers.avatar_uploaded;
+      const preview = answers.avatar_preview;
+      const error = answers.avatar_error;
+      html += `<label class="onb-photo-picker${preview ? " has-photo" : ""}">
+        ${preview ? `<img src="${escapeHtml(preview)}" alt="">` : `<span class="onb-photo-plus">+</span>`}
+        <input type="file" accept="image/*" data-onb-photo-input ${uploading ? "disabled" : ""}>
+      </label>
+      ${uploading ? '<div class="onb-photo-status">Загружаем и сжимаем…</div>' : ""}
+      ${uploaded && !uploading ? '<div class="onb-photo-status success">Фото загружено</div>' : ""}
+      ${error ? `<div class="onb-photo-status error">${escapeHtml(error)}</div>` : ""}`;
     } else {
       const isMulti = step.type === "multiselect";
       const selected = isMulti ? answers[step.key] || [] : answers[step.key];
@@ -375,6 +415,7 @@
       if (vals.includes("other") && !(a[`${step.key}_other`] || "").trim()) return false;
       return true;
     }
+    if (step.type === "photo") return !step.required || !!a.avatar_uploaded;
     return true;
   }
 
@@ -815,7 +856,9 @@
 
       let html = `<div class="scroll-pad">`;
       html += `<div class="profile-head">
-        <span class="avatar">${escapeHtml(initials(u.fio))}</span>
+        ${u.avatar_url
+          ? `<img class="avatar" src="${escapeHtml(u.avatar_url)}" alt="" onerror="this.outerHTML='<span class=&quot;avatar&quot;>${escapeHtml(initials(u.fio))}</span>'">`
+          : `<span class="avatar">${escapeHtml(initials(u.fio))}</span>`}
         <div style="min-width:0">
           <div class="profile-name">${escapeHtml(u.fio)}</div>
           ${u.company ? `<div class="profile-company">${escapeHtml(u.company)}</div>` : ""}

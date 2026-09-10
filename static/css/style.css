@@ -560,6 +560,7 @@ button, input, textarea {
   display: flex;
   align-items: center;
   justify-content: center;
+  object-fit: cover;
 }
 
 .avatar.small {
@@ -1725,6 +1726,56 @@ input::placeholder, textarea::placeholder {
   font-size: 12px;
   color: var(--muted);
 }
+
+.onb-photo-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 132px;
+  height: 132px;
+  margin: 26px auto 0;
+  border-radius: 50%;
+  background: rgba(12, 8, 3, .42);
+  border: 1px dashed var(--border-soft);
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.onb-photo-picker.has-photo {
+  border-style: solid;
+  border-color: var(--border-gold);
+}
+
+.onb-photo-picker img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.onb-photo-plus {
+  font-size: 34px;
+  font-weight: 300;
+  color: var(--muted);
+}
+
+.onb-photo-picker input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+}
+
+.onb-photo-status {
+  margin-top: 14px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.onb-photo-status.success { color: var(--success); }
+.onb-photo-status.error { color: var(--danger); }
 
 .onb-footer {
   flex: none;

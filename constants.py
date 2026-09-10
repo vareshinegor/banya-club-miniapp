@@ -208,4 +208,11 @@ ONBOARDING_STEPS = [
             {"value": "other", "label": "✏️ Другое"},
         ],
     },
+    {
+        "key": "avatar",
+        "type": "photo",
+        "title": "Добавь своё фото",
+        "question": "Это будет твоя аватарка в Ордене — братья должны видеть, с кем имеют дело.",
+        "required": True,
+    },
 ]

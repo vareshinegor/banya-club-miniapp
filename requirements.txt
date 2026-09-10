@@ -5,3 +5,5 @@ python-dotenv==1.0.1
 requests==2.34.2
 prodamuspy==1.0.2
 gunicorn==23.0.0
+Pillow==12.3.0
+pillow-heif==1.7.0
