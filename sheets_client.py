@@ -118,9 +118,11 @@ def find_user(telegram_id) -> Optional[dict]:
     return None
 
 
-def create_user(telegram_id, username, sb_id, fields: dict):
+def create_user(telegram_id, username, sb_id, fields: dict, avatar_url: str = ""):
     """fields: {header_name: value} for any subset of USERS_HEADERS. telegram_id,
-    username, sb_id, Статус и Дата регистрации проставляются здесь автоматически."""
+    username, sb_id, Статус и Дата регистрации проставляются здесь автоматически.
+    avatar_url — если фото уже загружено на шаге анкеты (он идёт раньше, чем
+    вызывается create_user)."""
     ws = get_worksheet(SHEET_USERS)
     row = []
     for header in USERS_HEADERS:
@@ -134,10 +136,30 @@ def create_user(telegram_id, username, sb_id, fields: dict):
             row.append(STATUS_PENDING)
         elif header == "Дата регистрации":
             row.append(_now())
+        elif header == "Аватарка":
+            row.append(avatar_url or "")
         else:
             row.append(fields.get(header, ""))
     ws.append_row(row, value_input_option="RAW")
     _invalidate_sheet_cache(SHEET_USERS)
+
+
+def set_avatar_url(telegram_id, url: str) -> bool:
+    """Записывает ссылку на аватар в колонку "Аватарка". Не ошибка, если строки
+    ещё нет (загрузка фото на шаге анкеты происходит раньше, чем создаётся
+    строка пользователя) — тогда просто ничего не делает, create_user() сам
+    проставит ссылку при регистрации."""
+    ws = get_worksheet(SHEET_USERS)
+    headers, rows = _rows_with_index(ws)
+    if "Аватарка" not in headers:
+        return False
+    col = headers.index("Аватарка") + 1
+    for row_number, record in rows:
+        if str(record.get("telegram_id", "")) == str(telegram_id):
+            ws.update_cell(row_number, col, url)
+            _invalidate_sheet_cache(SHEET_USERS)
+            return True
+    return False
 
 
 def mark_subscription_paid(telegram_id, sb_id: str = "") -> bool:

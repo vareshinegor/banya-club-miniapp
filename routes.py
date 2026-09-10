@@ -74,6 +74,13 @@ def _avatar_url(telegram_id) -> str:
     return f"/static/avatars/{telegram_id}.jpg?v={int(os.path.getmtime(path))}"
 
 
+def _absolute_avatar_url(telegram_id) -> str:
+    """Абсолютная ссылка для записи в Google Таблицу — админ должен мочь
+    открыть её прямо из таблицы, относительный путь для этого не годится."""
+    rel = _avatar_url(telegram_id)
+    return request.url_root.rstrip("/") + rel if rel else ""
+
+
 def _public_user(user: dict) -> dict:
     return {
         "fio": user.get("ФИО", ""),
@@ -189,6 +196,7 @@ def upload_avatar():
     except ValueError:
         return jsonify({"error": "invalid_image"}), 400
 
+    sheets.set_avatar_url(telegram_id, _absolute_avatar_url(telegram_id))
     return jsonify({"status": "ok", "url": _avatar_url(telegram_id)})
 
 
@@ -215,6 +223,7 @@ def admin_set_avatar():
     except ValueError:
         return jsonify({"error": "invalid_image"}), 400
 
+    sheets.set_avatar_url(telegram_id, _absolute_avatar_url(telegram_id))
     return jsonify({"status": "ok", "url": _avatar_url(telegram_id)})
 
 
@@ -274,7 +283,7 @@ def register():
         return jsonify({"error": "missing_fields"}), 400
 
     sb_id = sheets.find_platform_id(telegram_id) or ""
-    sheets.create_user(telegram_id, session.get("username"), sb_id, field_values)
+    sheets.create_user(telegram_id, session.get("username"), sb_id, field_values, _absolute_avatar_url(telegram_id))
 
     try:
         # Схема ключей задана стороной vakas-tools — менять только по согласованию с ними.
