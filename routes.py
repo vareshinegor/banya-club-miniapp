@@ -523,6 +523,7 @@ def materials():
             "link": m.get("Ссылка", ""),
             "category": m.get("Категория", ""),
             "date": m.get("Дата публикации", ""),
+            "photo": m.get("Фото", ""),
         }
         for m in items
     ]

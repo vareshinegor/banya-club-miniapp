@@ -790,7 +790,11 @@
 
   function materialCardHtml(m) {
     const linkAttr = m.link ? ` data-material-link="${escapeHtml(m.link)}"` : "";
+    const cover = m.photo
+      ? `<div class="card-cover"><img src="${escapeHtml(m.photo)}" alt="" loading="lazy" onerror="this.closest('.card-cover').remove()"></div>`
+      : "";
     return `<div class="card${m.link ? " clickable" : ""}"${linkAttr}>
+      ${cover}
       <div style="display:flex;gap:12px;align-items:flex-start">
         <div style="min-width:0;flex:1">
           <div style="font-size:16px;font-weight:500;line-height:1.32">${escapeHtml(m.title)}</div>
