@@ -379,6 +379,7 @@ def _public_event(e: dict, is_registered: bool, can_signup: bool, tier: str, reg
         "place": e.get("Место", ""),
         "price": _event_price_for_tier(e, tier),
         "photo": e.get("Фото", ""),
+        "photo_dark": e.get("Фото темное", "") or e.get("Фото", ""),
         "is_registered": is_registered,
         "can_signup": can_signup,
         "registered_quantity": registered_quantity,

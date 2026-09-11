@@ -602,11 +602,12 @@
       if (state.user.status_tier === "pending") html += moderationNoticeHtml();
 
       html += sectionLabelHtml("Ближайшее событие");
-      const nextCardBg = next && next.photo
-        ? ` style="background-image:linear-gradient(to top, rgba(10,8,4,.85), rgba(10,8,4,.35) 55%, rgba(10,8,4,.1)), url('${escapeHtml(next.photo)}')"`
+      const nextPhoto = next && next.photo_dark;
+      const nextCardBg = nextPhoto
+        ? ` style="background-image:linear-gradient(to top, rgba(10,8,4,.85), rgba(10,8,4,.35) 55%, rgba(10,8,4,.1)), url('${escapeHtml(nextPhoto)}')"`
         : "";
       html += next
-        ? `<div class="next-card${next.photo ? " has-photo" : ""}" data-open-event="${next.id}"${nextCardBg}>
+        ? `<div class="next-card${nextPhoto ? " has-photo" : ""}" data-open-event="${next.id}"${nextCardBg}>
             <div class="card-row">
               <div class="date-chip"><div class="day">${dayLabel(next._date)}</div><div class="month">${monthLabelShort(next._date)}</div></div>
               <div style="min-width:0">
