@@ -1154,6 +1154,14 @@ button, input, textarea {
   margin-bottom: 8px;
 }
 
+.participant-row.clickable {
+  cursor: pointer;
+}
+
+.participant-row.clickable:active {
+  background: #33443C;
+}
+
 .participant-info {
   display: grid;
   gap: 2px;

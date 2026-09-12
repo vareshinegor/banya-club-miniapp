@@ -23,8 +23,9 @@
   const state = {
     user: null,
     tab: "home",
-    route: "list", // 'list' | 'event'
+    route: "list", // 'list' | 'event' | 'attendee'
     eventId: null,
+    attendeeId: null,
     allParticipants: false,
     seg: "upcoming",
     materialsCategory: "Все",
@@ -523,7 +524,19 @@
     renderCurrent();
   }
 
+  function openAttendee(telegramId) {
+    state.route = "attendee";
+    state.attendeeId = telegramId;
+    renderCurrent();
+  }
+
+  function closeAttendee() {
+    state.route = "event";
+    renderCurrent();
+  }
+
   function renderCurrent() {
+    if (state.route === "attendee") { renderAttendeeDetail(); return; }
     if (state.route === "event") { renderEventDetail(); return; }
     if (state.tab === "home") renderHome();
     else if (state.tab === "afisha") renderAfisha();
@@ -546,8 +559,10 @@
     if (segBtn) { state.seg = segBtn.dataset.seg; renderAfisha(); return; }
     const linkBtn = e.target.closest("[data-material-link]");
     if (linkBtn) { e.preventDefault(); openExternalLink(linkBtn.dataset.materialLink); return; }
+    const attendeeBtn = e.target.closest("[data-open-attendee]");
+    if (attendeeBtn) { openAttendee(attendeeBtn.dataset.openAttendee); return; }
     const backBtn = e.target.closest('[data-action="back"]');
-    if (backBtn) { closeEvent(); return; }
+    if (backBtn) { if (state.route === "attendee") closeAttendee(); else closeEvent(); return; }
     const showAllBtn = e.target.closest('[data-action="show-all-participants"]');
     if (showAllBtn) { state.allParticipants = true; renderEventDetail(); return; }
     const retryBtn = e.target.closest('[data-action="retry"]');
@@ -757,7 +772,11 @@
 
       html += `<div class="participants-title"><span>Участники</span><span>${data.attendees_count} резидент${pluralSuffix(data.attendees_count)}</span></div>`;
       html += shown.length
-        ? shown.map((p) => `<div class="participant-row"><span class="avatar small">${escapeHtml(initials(p.fio))}</span><span class="participant-info"><span class="participant-name">${escapeHtml(p.fio)}</span><span class="participant-niche">${escapeHtml(p.niche || "")}</span></span></div>`).join("")
+        ? shown.map((p) => {
+            const clickable = !!p.telegram_id;
+            const attr = clickable ? ` data-open-attendee="${escapeHtml(p.telegram_id)}"` : "";
+            return `<div class="participant-row${clickable ? " clickable" : ""}"${attr}><span class="avatar small">${escapeHtml(initials(p.fio))}</span><span class="participant-info"><span class="participant-name">${escapeHtml(p.fio)}</span><span class="participant-niche">${escapeHtml(p.niche || "")}</span></span></div>`;
+          }).join("")
         : `<div class="dashed-box">Пока никто не записался — станьте первым!</div>`;
       if (!state.allParticipants && data.attendees.length > 5) {
         html += `<button class="btn-secondary" data-action="show-all-participants" style="margin-top:10px">Показать всех</button>`;
@@ -774,6 +793,47 @@
     }
   }
 
+  async function renderAttendeeDetail() {
+    const content = document.getElementById("tab-content");
+    document.getElementById("sticky-action").hidden = true;
+    content.innerHTML = detailTopbarHtml("Участник") + `<div class="scroll-pad">${skeletonHtml(3)}</div>`;
+    try {
+      const data = await api(`/events/${state.eventId}/attendees/${state.attendeeId}`);
+      const u = data.user;
+
+      let html = `<div class="scroll-pad">`;
+      html += `<div class="profile-head">
+        ${u.avatar_url
+          ? `<img class="avatar" src="${escapeHtml(u.avatar_url)}" alt="" onerror="this.outerHTML='<span class=&quot;avatar&quot;>${escapeHtml(initials(u.fio))}</span>'">`
+          : `<span class="avatar">${escapeHtml(initials(u.fio))}</span>`}
+        <div style="min-width:0">
+          <div class="profile-name">${escapeHtml(u.fio)}</div>
+          ${u.company ? `<div class="profile-company">${escapeHtml(u.company)}</div>` : ""}
+        </div>
+      </div>`;
+
+      const fields = [
+        { label: "ФИО", value: u.fio },
+        { label: "Компания", value: u.company },
+        { label: "Должность", value: u.position || "не указана" },
+        { label: "Сфера", chips: splitChips(u.sphere) },
+        { label: "Роль", value: u.role },
+        { label: "Запрос", chips: splitChips(u.request) },
+        { label: "Предложение", value: u.offer },
+        { label: "Город", value: u.city },
+        { label: "Телефон", value: u.phone || "не указан" },
+        { label: "Telegram", value: u.telegram_username ? "@" + u.telegram_username : "не указан" },
+        { label: "В Ордене с", value: u.since || "—" },
+      ];
+      html += sectionLabelHtml("Анкета") + `<div>${fields.map(profileFieldRowHtml).join("")}</div>`;
+      html += `</div>`;
+
+      content.innerHTML = detailTopbarHtml("Участник") + html;
+    } catch (err) {
+      content.innerHTML = detailTopbarHtml("Участник") + errorStateHtml();
+    }
+  }
+
   function pluralSuffix(n) {
     const mod10 = n % 10;
     const mod100 = n % 100;
@@ -783,8 +843,8 @@
     return "ов";
   }
 
-  function detailTopbarHtml() {
-    return `<div class="detail-topbar"><button class="back-btn" data-action="back" aria-label="Назад"><svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 4l-6 6 6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span>Событие</span></div>`;
+  function detailTopbarHtml(title) {
+    return `<div class="detail-topbar"><button class="back-btn" data-action="back" aria-label="Назад"><svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12 4l-6 6 6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span>${escapeHtml(title || "Событие")}</span></div>`;
   }
 
   // --- Материалы -------------------------------------------------------------

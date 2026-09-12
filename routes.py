@@ -426,14 +426,47 @@ def event_detail(event_id):
     user = sheets.find_user(telegram_id)
     tier = _membership_tier(user)
     attendees = sheets.list_attendees(event_id)
+    attendees_count = sum(a.get("quantity", 1) for a in attendees)
+    if tier != "resident":
+        # Нерезиденты и "на рассмотрении" видят только список (ФИО + ниша) —
+        # без telegram_id, чтобы фронтенд не мог сделать карточку кликабельной.
+        attendees = [{"fio": a["fio"], "niche": a["niche"], "quantity": a["quantity"]} for a in attendees]
     registered_quantity = sheets.get_signup_quantity(telegram_id, event_id)
     return jsonify(
         {
             "event": _public_event(event, registered_quantity > 0, _can_signup(tier), tier, registered_quantity),
             "attendees": attendees,
-            "attendees_count": sum(a.get("quantity", 1) for a in attendees),
+            "attendees_count": attendees_count,
+            "can_view_attendee_profiles": tier == "resident",
         }
     )
+
+
+@api.route("/events/<int:event_id>/attendees/<telegram_id>", methods=["GET"])
+def attendee_profile(event_id, telegram_id):
+    """Полная анкета конкретного участника события — только для резидентов,
+    и только если этот человек реально оплатил именно это событие (не общий
+    справочник по всем пользователям)."""
+    requester_id = _current_telegram_id()
+    if not requester_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    requester = sheets.find_user(requester_id)
+    if _membership_tier(requester) != "resident":
+        return jsonify({"error": "forbidden"}), 403
+
+    event = sheets.get_event(event_id)
+    if not event:
+        return jsonify({"error": "event_not_found"}), 404
+
+    if not sheets.is_signed_up(telegram_id, event_id):
+        return jsonify({"error": "not_found"}), 404
+
+    target = sheets.find_user(telegram_id)
+    if not target:
+        return jsonify({"error": "not_found"}), 404
+
+    return jsonify({"user": _public_user(target)})
 
 
 @api.route("/events/<int:event_id>/signup", methods=["POST"])

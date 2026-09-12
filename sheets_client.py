@@ -371,7 +371,7 @@ def list_attendees(event_id) -> list:
             quantity = 1
         first_sphere = (user.get("Сфера", "") or "").split(",")[0].strip()
         niche = " · ".join(part for part in (first_sphere, user.get("Компания/Проект", "")) if part)
-        attendees.append({"fio": user.get("ФИО", ""), "niche": niche, "quantity": quantity})
+        attendees.append({"telegram_id": telegram_id, "fio": user.get("ФИО", ""), "niche": niche, "quantity": quantity})
     return attendees
 
 
