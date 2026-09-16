@@ -332,6 +332,13 @@ def salebot_webhook():
     telegram_id = data.get("platform_id") or data.get("telegram_id")
     sb_id = data.get("client_id") or data.get("sb_id")
     if not telegram_id or not sb_id:
+        # Временная диагностика: смотрим, что реально шлёт salebot (иногда
+        # это не JSON вовсе, или другие названия полей) — убрать после
+        # того, как разберёмся с их форматом.
+        print(
+            f"[salebot_webhook] missing_fields — Content-Type={request.content_type!r} "
+            f"parsed={data!r} raw_body={request.get_data(as_text=True)!r}"
+        )
         return jsonify({"error": "missing_fields"}), 400
 
     sheets.save_platform_id(telegram_id, sb_id)
