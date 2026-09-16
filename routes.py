@@ -310,6 +310,11 @@ def register():
     except Exception as exc:  # вебхук недоступен/не настроен — заявка в клуб всё равно должна пройти
         print(f"[webhook] не удалось отправить заявку: {exc}")
 
+    try:
+        webhook_client.notify_anketa_done(telegram_id)
+    except Exception as exc:
+        print(f"[webhook] не удалось отправить колбэк анкеты в salebot: {exc}")
+
     user = sheets.find_user(telegram_id)
     return jsonify({"status": "active", "user": _public_user(user)})
 
