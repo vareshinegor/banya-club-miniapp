@@ -33,7 +33,10 @@ class Config:
     PRODAMUS_RETURN_URL = os.environ.get("PRODAMUS_RETURN_URL", "https://t.me/banniy_orden_bot")
 
     # Колбэк в salebot после того, как человек заполнил анкету в мини-аппе —
-    # запускает у них следующий шаг сценария. URL содержит литеральную
-    # подстроку "{platform_id}", которую мы заменяем на реальный telegram_id
-    # перед запросом. Если пусто — колбэк просто не отправляется.
+    # запускает у них следующий шаг сценария. Их API идентифицирует человека
+    # по client_id/email/phone (НЕ platform_id — проверено на реальном
+    # запросе, без client_id salebot отвечает ошибкой). URL содержит
+    # литеральную подстроку "{client_id}", которую мы заменяем на sb_id
+    # (найденный по telegram_id через /api/webhooks/salebot до регистрации).
+    # Если пусто — колбэк просто не отправляется.
     SALEBOT_ANKETA_DONE_URL = os.environ.get("SALEBOT_ANKETA_DONE_URL", "")

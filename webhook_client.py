@@ -23,15 +23,17 @@ def send_application(payload: dict) -> None:
     resp.raise_for_status()
 
 
-def notify_anketa_done(telegram_id) -> None:
+def notify_anketa_done(sb_id) -> None:
     """GET-колбэк в salebot сразу после того, как человек заполнил анкету в
-    мини-аппе — подставляет telegram_id в "{platform_id}" внутри
-    Config.SALEBOT_ANKETA_DONE_URL. Поднимает requests.RequestException при
-    сбое — как и send_application(), вызывающий код должен ловить и не
-    ронять регистрацию из-за недоступности salebot."""
-    if not Config.SALEBOT_ANKETA_DONE_URL:
+    мини-аппе — подставляет sb_id (их client_id, НЕ telegram_id — их API
+    требует именно его) в "{client_id}" внутри Config.SALEBOT_ANKETA_DONE_URL.
+    Ничего не отправляет, если sb_id пуст (человек прошёл анкету раньше, чем
+    salebot успел прислать связку telegram_id<->client_id). Поднимает
+    requests.RequestException при сбое — как и send_application(), вызывающий
+    код должен ловить и не ронять регистрацию из-за недоступности salebot."""
+    if not Config.SALEBOT_ANKETA_DONE_URL or not sb_id:
         return
 
-    url = Config.SALEBOT_ANKETA_DONE_URL.replace("{platform_id}", str(telegram_id))
+    url = Config.SALEBOT_ANKETA_DONE_URL.replace("{client_id}", str(sb_id))
     resp = requests.get(url, timeout=_TIMEOUT)
     resp.raise_for_status()

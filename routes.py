@@ -311,7 +311,7 @@ def register():
         print(f"[webhook] не удалось отправить заявку: {exc}")
 
     try:
-        webhook_client.notify_anketa_done(telegram_id)
+        webhook_client.notify_anketa_done(sb_id)
     except Exception as exc:
         print(f"[webhook] не удалось отправить колбэк анкеты в salebot: {exc}")
 
