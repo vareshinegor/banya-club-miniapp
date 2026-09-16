@@ -326,8 +326,10 @@ def salebot_webhook():
     salebot когда-нибудь начнёт слать поля правильно названными."""
     secret = Config.INCOMING_WEBHOOK_SECRET
     if secret and request.args.get("token") != secret:
-        # Временная диагностика — убрать после разбора.
-        print(f"[salebot_webhook] unauthorized — received token={request.args.get('token')!r} full_qs={request.query_string!r}")
+        # Временная диагностика — токен теперь шлют в заголовке, а не в
+        # ссылке; смотрим все заголовки, чтобы понять, как называется. Убрать
+        # после разбора.
+        print(f"[salebot_webhook] unauthorized — qs={request.query_string!r} headers={dict(request.headers)!r}")
         return jsonify({"error": "unauthorized"}), 401
 
     data = request.get_json(silent=True) or {}
