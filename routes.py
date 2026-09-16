@@ -314,6 +314,15 @@ def register():
     return jsonify({"status": "active", "user": _public_user(user)})
 
 
+def _webhook_authorized() -> bool:
+    """salebot шлёт секрет в заголовке "token" (раньше был ?token= в ссылке —
+    оставляем и это на случай других интеграций)."""
+    secret = Config.INCOMING_WEBHOOK_SECRET
+    if not secret:
+        return True
+    return request.headers.get("token") == secret or request.args.get("token") == secret
+
+
 @api.route("/webhooks/salebot", methods=["POST"])
 def salebot_webhook():
     """Входящий вебхук от сейлбота. Не требует Telegram-сессии — это серверный
@@ -324,19 +333,13 @@ def salebot_webhook():
     внутренний ID клиента (наш sb_id) приходит в поле "client_id". Оставляем
     также поддержку "телеграм_id"/"platform_id" как sb_id на случай, если
     salebot когда-нибудь начнёт слать поля правильно названными."""
-    secret = Config.INCOMING_WEBHOOK_SECRET
-    if secret and request.args.get("token") != secret:
-        # Временная диагностика — токен теперь шлют в заголовке, а не в
-        # ссылке; смотрим все заголовки, чтобы понять, как называется. Убрать
-        # после разбора.
-        print(f"[salebot_webhook] unauthorized — qs={request.query_string!r} headers={dict(request.headers)!r}")
+    if not _webhook_authorized():
         return jsonify({"error": "unauthorized"}), 401
 
     data = request.get_json(silent=True) or {}
     telegram_id = data.get("platform_id") or data.get("telegram_id")
     sb_id = data.get("client_id") or data.get("sb_id")
     if not telegram_id or not sb_id:
-        print(f"[salebot_webhook] missing_fields — Content-Type={request.content_type!r} raw_body={request.get_data(as_text=True)!r}")
         return jsonify({"error": "missing_fields"}), 400
 
     sheets.save_platform_id(telegram_id, sb_id)
@@ -349,8 +352,7 @@ def salebot_subscription_webhook():
     оплата подписки проходит на их стороне, не через наш Продамус (тот
     оформляет только разовую оплату конкретной бани). Переводит пользователя
     в STATUS_RESIDENT. Не требует Telegram-сессии — серверный вызов от salebot."""
-    secret = Config.INCOMING_WEBHOOK_SECRET
-    if secret and request.args.get("token") != secret:
+    if not _webhook_authorized():
         return jsonify({"error": "unauthorized"}), 401
 
     data = request.get_json(silent=True) or {}
