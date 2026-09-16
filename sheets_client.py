@@ -18,6 +18,7 @@ from constants import (
     SIGNUP_STATUS_PAID,
     SIGNUP_STATUS_PENDING,
     SIGNUPS_HEADERS,
+    STATUS_NON_RESIDENT,
     STATUS_PENDING,
     STATUS_RESIDENT,
     USERS_HEADERS,
@@ -174,6 +175,27 @@ def mark_subscription_paid(telegram_id, sb_id: str = "") -> bool:
     for row_number, record in rows:
         if str(record.get("telegram_id", "")) == str(telegram_id):
             ws.update_cell(row_number, col_map["Статус"], STATUS_RESIDENT)
+            if sb_id and not (record.get("sb_id") or "").strip():
+                ws.update_cell(row_number, col_map["sb_id"], str(sb_id))
+            _invalidate_sheet_cache(SHEET_USERS)
+            return True
+    return False
+
+
+def mark_reviewed_non_resident(telegram_id, sb_id: str = "") -> bool:
+    """Анкета рассмотрена и одобрена вебхуком salebot, но подписку человек ещё
+    не купил — переводит в STATUS_NON_RESIDENT. Не трогает уже оплативших
+    (STATUS_RESIDENT), чтобы повторный/запоздавший вызов не понижал резидента
+    обратно. sb_id — как в mark_subscription_paid, дозаписывается только если
+    поле пустое. Возвращает False, если такого telegram_id нет в таблице."""
+    ws = get_worksheet(SHEET_USERS)
+    headers, rows = _rows_with_index(ws)
+    col_map = {h: i + 1 for i, h in enumerate(headers)}
+    for row_number, record in rows:
+        if str(record.get("telegram_id", "")) == str(telegram_id):
+            current = (record.get("Статус") or "").strip().casefold()
+            if current != STATUS_RESIDENT.casefold():
+                ws.update_cell(row_number, col_map["Статус"], STATUS_NON_RESIDENT)
             if sb_id and not (record.get("sb_id") or "").strip():
                 ws.update_cell(row_number, col_map["sb_id"], str(sb_id))
             _invalidate_sheet_cache(SHEET_USERS)

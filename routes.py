@@ -371,6 +371,27 @@ def salebot_subscription_webhook():
     return jsonify({"status": "ok"})
 
 
+@api.route("/webhooks/salebot/approve", methods=["POST"])
+def salebot_approve_webhook():
+    """Вебхук от salebot, когда анкету рассмотрели и одобрили, но подписку
+    человек ещё не купил — переводит из "на рассмотрении" в "нерезидент".
+    Тело точно такое же, как у /subscription (tg_id/telegram_id/platform_id
+    + опционально sb_id/client_id). Уже оплативших (STATUS_RESIDENT) не
+    понижает — см. sheets.mark_reviewed_non_resident."""
+    if not _webhook_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    telegram_id = data.get("tg_id") or data.get("telegram_id") or data.get("platform_id")
+    sb_id = data.get("sb_id") or data.get("client_id") or ""
+    if not telegram_id:
+        return jsonify({"error": "missing_fields"}), 400
+
+    if not sheets.mark_reviewed_non_resident(telegram_id, sb_id):
+        return jsonify({"error": "user_not_found"}), 404
+    return jsonify({"status": "ok"})
+
+
 def _event_price_for_tier(event: dict, tier: str) -> str:
     """Нерезиденты видят "Цена нерезидент", если админ её заполнил — иначе
     (как и резиденты) обычную "Цена"."""
@@ -559,6 +580,10 @@ def materials():
     telegram_id = _current_telegram_id()
     if not telegram_id:
         return jsonify({"error": "unauthorized"}), 401
+
+    user = sheets.find_user(telegram_id)
+    if _membership_tier(user) != "resident":
+        return jsonify({"error": "resident_only"}), 403
 
     items = sheets.list_materials()
     result = [

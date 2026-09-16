@@ -606,7 +606,11 @@
     const content = document.getElementById("tab-content");
     content.innerHTML = pageHeaderHtml("Банный орден") + `<div class="scroll-pad">${skeletonHtml(4)}</div>`;
     try {
-      const [eventsData, materialsData] = await Promise.all([getEvents(), getMaterials()]);
+      const canSeeMaterials = state.user.status_tier === "resident";
+      const [eventsData, materialsData] = await Promise.all([
+        getEvents(),
+        canSeeMaterials ? getMaterials() : Promise.resolve({ materials: [] }),
+      ]);
       const events = eventsData.events.map(withDate);
       const upcoming = events.filter((e) => !e._past).sort(byDateAsc);
       const next = upcoming[0];
@@ -638,10 +642,12 @@
       html += sectionLabelHtml("Мои записи", `<span style="font-size:12px;color:var(--muted)">${monthYearLabel(new Date())}</span>`);
       html += calendarHtml(events, new Date());
 
-      html += sectionLabelHtml("Свежее в библиотеке", `<button class="link-btn" data-go-tab="materials">Все материалы</button>`);
-      html += materialsData.materials.length
-        ? materialsData.materials.slice(0, 2).map(freshMaterialRowHtml).join("")
-        : `<div class="dashed-box">Материалов пока нет</div>`;
+      if (canSeeMaterials) {
+        html += sectionLabelHtml("Свежее в библиотеке", `<button class="link-btn" data-go-tab="materials">Все материалы</button>`);
+        html += materialsData.materials.length
+          ? materialsData.materials.slice(0, 2).map(freshMaterialRowHtml).join("")
+          : `<div class="dashed-box">Материалов пока нет</div>`;
+      }
 
       html += `</div>`;
       content.innerHTML = pageHeaderHtml("Банный орден") + html;
@@ -893,7 +899,11 @@
       html += `</div>`;
       content.innerHTML = pageHeaderHtml("Материалы") + html;
     } catch (err) {
-      content.innerHTML = pageHeaderHtml("Материалы") + errorStateHtml();
+      if (err.message === "resident_only") {
+        content.innerHTML = pageHeaderHtml("Материалы") + `<div class="scroll-pad"><div class="state-empty"><div class="state-title">Доступно только резидентам</div><p class="state-text">Библиотека материалов открывается после подтверждения резидентства.</p></div></div>`;
+      } else {
+        content.innerHTML = pageHeaderHtml("Материалы") + errorStateHtml();
+      }
     }
   }
 
