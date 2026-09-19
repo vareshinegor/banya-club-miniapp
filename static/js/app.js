@@ -5,8 +5,13 @@
     tg.expand();
   }
 
-  const devId = new URLSearchParams(window.location.search).get("dev_id");
-  const authQuery = window.DEV_MODE && devId ? `?dev_id=${encodeURIComponent(devId)}` : "";
+  const devParams = new URLSearchParams(window.location.search);
+  const devId = devParams.get("dev_id");
+  // dev_start имитирует startapp-параметр реферальной ссылки (?startapp=ref_<id>) при отладке в браузере
+  const devStart = devParams.get("dev_start");
+  const authQuery = window.DEV_MODE && devId
+    ? `?dev_id=${encodeURIComponent(devId)}${devStart ? `&dev_start=${encodeURIComponent(devStart)}` : ""}`
+    : "";
 
   const screens = {
     loading: document.getElementById("screen-loading"),
@@ -29,7 +34,7 @@
     allParticipants: false,
     seg: "upcoming",
     materialsCategory: "Все",
-    cache: { events: null, profile: null, materials: null },
+    cache: { events: null, profile: null, materials: null, wallet: null },
     onb: { phase: "intro", index: 0, steps: [], answers: {} },
     faqOpen: 0,
     pay: { eventId: null, phase: "form", agree: false },
@@ -217,6 +222,10 @@
   async function getMaterials(force) {
     if (!state.cache.materials || force) state.cache.materials = await api("/materials");
     return state.cache.materials;
+  }
+  async function getWallet(force) {
+    if (!state.cache.wallet || force) state.cache.wallet = await api("/wallet");
+    return state.cache.wallet;
   }
 
   // --- Инициализация --------------------------------------------------------
@@ -565,6 +574,28 @@
     if (linkBtn) { e.preventDefault(); openExternalLink(linkBtn.dataset.materialLink); return; }
     const attendeeBtn = e.target.closest("[data-open-attendee]");
     if (attendeeBtn) { openAttendee(attendeeBtn.dataset.openAttendee); return; }
+    const refShare = e.target.closest('[data-action="ref-share"]');
+    if (refShare) { if (state.cache.wallet) shareReferral(state.cache.wallet.referral_link); return; }
+    const refCopy = e.target.closest('[data-action="ref-copy"]');
+    if (refCopy) {
+      if (!state.cache.wallet) return;
+      copyText(state.cache.wallet.referral_link).then((ok) => {
+        if (!ok) {
+          // буфер обмена недоступен (некоторые WebView) — выделяем ссылку, чтобы её можно было скопировать вручную
+          const box = document.querySelector(".wallet-link");
+          if (box) {
+            const range = document.createRange();
+            range.selectNodeContents(box);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+        }
+        refCopy.textContent = ok ? "Скопировано" : "Ссылка выделена";
+        setTimeout(() => { refCopy.textContent = "Скопировать"; }, 1800);
+      });
+      return;
+    }
     const backBtn = e.target.closest('[data-action="back"]');
     if (backBtn) { if (state.route === "attendee") closeAttendee(); else closeEvent(); return; }
     const showAllBtn = e.target.closest('[data-action="show-all-participants"]');
@@ -588,7 +619,21 @@
 
   document.getElementById("pay-overlay").addEventListener("click", (e) => {
     if (e.target.closest('[data-action="pay-close"]')) { closePayment(); return; }
-    if (e.target.closest('[data-action="pay-agree"]')) { state.pay.agree = !state.pay.agree; renderPaymentSheet(); return; }
+    if (e.target.closest('[data-action="pay-done"]')) { closePayment(); renderCurrent(); return; }
+    if (e.target.closest('[data-action="pay-agree"]')) { state.pay.agree = !state.pay.agree; refreshPayBottom(); return; }
+    if (e.target.closest('[data-action="pay-promo-apply"]')) { applyPromo(); return; }
+    if (e.target.closest('[data-action="pay-promo-clear"]')) {
+      state.pay.promo = null;
+      state.pay.promoInput = "";
+      state.pay.promoError = "";
+      renderPaymentSheet();
+      return;
+    }
+    if (e.target.closest('[data-action="pay-points-max"]')) {
+      state.pay.points = payTotals().cap;
+      renderPaymentSheet();
+      return;
+    }
     if (e.target.closest('[data-action="pay-qty-dec"]')) {
       state.pay.quantity = Math.max(1, (state.pay.quantity || 1) - 1);
       renderPaymentSheet();
@@ -602,6 +647,25 @@
     }
     if (e.target.closest('[data-action="pay-submit"]')) { paySubmit(); return; }
     if (e.target.closest('[data-action="pay-retry"]')) { paySubmit(); return; }
+  });
+  // Ввод в полях оплаты: итоги пересчитываем на лету, не перерисовывая сами поля
+  document.getElementById("pay-overlay").addEventListener("input", (e) => {
+    if (e.target.id === "pay-promo-input") {
+      state.pay.promoInput = e.target.value;
+    } else if (e.target.id === "pay-points-input") {
+      const raw = parseInt(e.target.value, 10);
+      state.pay.points = Number.isFinite(raw) ? raw : 0;
+      refreshPayBottom();
+    }
+  });
+  document.getElementById("pay-overlay").addEventListener("change", (e) => {
+    if (e.target.id === "pay-points-input") {
+      // после ввода подрезаем до допустимого максимума и показываем итоговое число
+      const t = payTotals();
+      state.pay.points = t.points;
+      e.target.value = t.points || "";
+      refreshPayBottom();
+    }
   });
 
   // --- Главная ---------------------------------------------------------------
@@ -928,11 +992,68 @@
     return `<div class="field-row"><span class="field-label">${escapeHtml(f.label)}</span><span class="field-value"${muted ? ' style="color:var(--muted)"' : ""}>${escapeHtml(f.value || "—")}</span></div>`;
   }
 
+  function walletBlockHtml(w) {
+    const fmt = (n) => Math.abs(n).toLocaleString("ru-RU");
+    const history = (w.history || []).slice(0, 5)
+      .map((h) => `<div class="wallet-hist-row"><span>${escapeHtml(h.reason)}<em>${escapeHtml(h.date)}</em></span><span class="${h.amount > 0 ? "plus" : "minus"}">${h.amount > 0 ? "+" : "−"}${fmt(h.amount)}</span></div>`)
+      .join("");
+    const stats = w.referrals && w.referrals.total
+      ? `<div class="wallet-stats">Приглашено: ${w.referrals.total} · наград получено: ${w.referrals.rewarded}</div>`
+      : "";
+    return `<div class="wallet-card">
+      <div class="wallet-head">
+        <span class="wallet-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M5 19c0-8 5-13 14-14 0 9-5 14-13 14z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M5 19c2-4 5-7 9-9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+        <div>
+          <div class="wallet-label">Листики</div>
+          <div class="wallet-balance">${fmt(w.balance)}</div>
+        </div>
+      </div>
+      <p class="wallet-note">1 листик = 1 ₽. Ими можно оплатить часть или всю стоимость бани.</p>
+      <div class="wallet-ref">
+        <div class="wallet-ref-title">Пригласите друга — ${fmt(w.reward)} листиков вам</div>
+        <div class="wallet-ref-text">Начислим, когда анкету друга одобрят. Друг должен открыть Банный Орден по вашей ссылке.</div>
+        <div class="wallet-link">${escapeHtml(w.referral_link)}</div>
+        <div class="wallet-ref-actions">
+          <button type="button" class="btn-primary" data-action="ref-share">Поделиться</button>
+          <button type="button" class="btn-secondary" data-action="ref-copy">Скопировать</button>
+        </div>
+        ${stats}
+      </div>
+      ${history ? `<div class="wallet-hist">${history}</div>` : ""}
+    </div>`;
+  }
+
+  function shareReferral(link) {
+    const text = "Приглашаю тебя в Банный Орден — закрытое сообщество предпринимателей";
+    const url = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
+    if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+    else window.open(url, "_blank");
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      ta.remove();
+      return ok;
+    }
+  }
+
   async function renderProfile() {
     const content = document.getElementById("tab-content");
     content.innerHTML = pageHeaderHtml("Профиль") + `<div class="scroll-pad">${skeletonHtml(3)}</div>`;
     try {
-      const data = await getProfile();
+      // кошелёк подгружаем рядом с профилем; если он не загрузился — просто без блока
+      const [data, wallet] = await Promise.all([getProfile(), getWallet(true).catch(() => null)]);
       const u = data.user;
       state.user = { ...state.user, ...u };
 
@@ -951,6 +1072,8 @@
               : '<span class="badge badge-moderation" style="display:inline-flex;margin-top:9px">На модерации</span>'}
         </div>
       </div>`;
+
+      if (wallet) html += walletBlockHtml(wallet);
 
       const fields = [
         { label: "ФИО", value: u.fio },
@@ -1059,7 +1182,16 @@
     attachVideoDurationHandlers();
   }
 
-  // --- Оплата участия (визуальная имитация Продамуса) -----------------------
+  // --- Оплата участия -------------------------------------------------------
+
+  const PROMO_ERRORS = {
+    promo_not_found: "Такого промокода нет",
+    promo_inactive: "Этот промокод отключён",
+    promo_invalid: "Промокод настроен неверно — обратитесь к администратору",
+    promo_expired: "Срок действия промокода истёк",
+    promo_not_applicable: "Этот промокод не действует на это событие",
+    promo_exhausted: "Промокод уже использован максимальное число раз",
+  };
 
   function findCachedEvent(id) {
     const idStr = String(id);
@@ -1078,39 +1210,133 @@
     return `${Math.round(num).toLocaleString("ru-RU")} ₽`;
   }
 
+  // Итоги заказа: считаются так же, как на сервере (сервер всё равно пересчитывает
+  // сам и не верит числам с клиента) — тут только чтобы человек видел сумму заранее.
+  function payTotals() {
+    const p = state.pay;
+    const unit = p.event ? parsePriceRub(p.event.price) : 0;
+    const qty = p.quantity || 1;
+    const base = Math.round(unit * qty);
+    let promoDiscount = 0;
+    if (p.promo) {
+      const size = Math.max(Number(p.promo.size) || 0, 0);
+      promoDiscount = p.promo.type === "percent"
+        ? Math.min(base, Math.round((base * Math.min(size, 100)) / 100))
+        : Math.min(base, Math.round(size));
+    }
+    const afterPromo = base - promoDiscount;
+    const cap = Math.max(0, Math.min(Math.floor(p.balance || 0), afterPromo));
+    const points = Math.max(0, Math.min(Math.floor(Number(p.points) || 0), cap));
+    return { unit, base, promoDiscount, afterPromo, cap, points, due: afterPromo - points };
+  }
+
+  function newPayState(id) {
+    return {
+      eventId: id, phase: "form", agree: false, quantity: 1, event: findCachedEvent(id),
+      promoInput: "", promo: null, promoError: "", promoBusy: false, points: 0, balance: 0,
+    };
+  }
+
   async function openPayment(id) {
-    state.pay = { eventId: id, phase: "form", agree: false, quantity: 1, event: findCachedEvent(id) };
+    state.pay = newPayState(id);
+    const p = state.pay;
     document.getElementById("pay-overlay").hidden = false;
     renderPaymentSheet();
-    if (!state.pay.event) {
+    if (!p.event) {
       try {
         const data = await api(`/events/${id}`);
-        if (state.pay.eventId === id) {
-          state.pay.event = data.event;
+        if (state.pay === p) {
+          p.event = data.event;
           renderPaymentSheet();
         }
       } catch (err) {
         // оставим форму с прочерками — id события уже есть, оплата всё равно сработает
       }
     }
+    try {
+      const wallet = await getWallet(true);
+      if (state.pay === p && p.phase === "form") {
+        p.balance = wallet.balance || 0;
+        renderPaymentSheet();
+      }
+    } catch (err) {
+      // без кошелька просто не показываем блок с листиками
+    }
   }
 
   function closePayment() {
     document.getElementById("pay-overlay").hidden = true;
-    state.pay = { eventId: null, phase: "form", agree: false, quantity: 1 };
+    state.pay = { eventId: null, phase: "form", agree: false, quantity: 1, promo: null, points: 0, balance: 0 };
+  }
+
+  function promoBlockHtml(p) {
+    let msg = "";
+    if (p.promo) {
+      const label = p.promo.type === "percent" ? `−${Math.round(p.promo.size)}%` : `−${formatPriceRub(p.promo.size)}`;
+      msg = `<div class="pay-msg ok">Промокод применён (${escapeHtml(label)})</div>`;
+    } else if (p.promoError) {
+      msg = `<div class="pay-msg err">${escapeHtml(p.promoError)}</div>`;
+    }
+    return `<div class="pay-promo">
+      <div class="pay-inline">
+        <input type="text" id="pay-promo-input" class="pay-input" placeholder="Промокод" value="${escapeHtml(p.promo ? p.promo.code : p.promoInput)}" autocomplete="off" autocapitalize="characters" spellcheck="false"${p.promo || p.promoBusy ? " disabled" : ""}>
+        ${p.promo
+          ? '<button type="button" class="pay-mini-btn" data-action="pay-promo-clear">Убрать</button>'
+          : `<button type="button" class="pay-mini-btn" data-action="pay-promo-apply"${p.promoBusy ? " disabled" : ""}>${p.promoBusy ? "…" : "Применить"}</button>`}
+      </div>${msg}
+    </div>`;
+  }
+
+  function pointsBlockHtml(p, t) {
+    return `<div class="pay-points">
+      <div class="pay-points-head"><span>Оплатить листиками</span><span class="pay-points-balance">на балансе ${Math.floor(p.balance).toLocaleString("ru-RU")}</span></div>
+      <div class="pay-inline">
+        <input type="number" id="pay-points-input" class="pay-input" inputmode="numeric" min="0" max="${t.cap}" step="1" placeholder="0" value="${t.points || ""}">
+        <button type="button" class="pay-mini-btn" data-action="pay-points-max"${t.cap <= 0 ? " disabled" : ""}>Максимум</button>
+      </div>
+    </div>`;
+  }
+
+  // Нижняя часть формы (итоги, согласие, кнопка) перерисовывается отдельно от
+  // полей ввода — иначе при наборе листиков поле теряло бы фокус на каждой цифре.
+  function payBottomHtml(p, t) {
+    const lines = [];
+    if (t.promoDiscount) lines.push(`<div class="pay-row"><span>Промокод ${escapeHtml(p.promo.code)}</span><span>−${formatPriceRub(t.promoDiscount)}</span></div>`);
+    if (t.points) lines.push(`<div class="pay-row"><span>Листики</span><span>−${formatPriceRub(t.points)}</span></div>`);
+    const summary = lines.length
+      ? `<div class="pay-summary"><div class="pay-row"><span>Стоимость</span><span>${formatPriceRub(t.base)}</span></div>${lines.join("")}</div>`
+      : "";
+    const free = t.unit > 0 && t.due === 0;
+    const btnLabel = !t.unit ? "Перейти к оплате" : free ? "Записаться" : `Перейти к оплате · ${formatPriceRub(t.due)}`;
+    return `${summary}
+      <div class="pay-total"><span>К оплате</span><span class="amount">${t.unit ? formatPriceRub(t.due) : "—"}</span></div>
+      <button type="button" class="pay-agree" data-action="pay-agree">
+        <span class="pay-check${p.agree ? " checked" : ""}">${p.agree ? '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="#213902" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' : ""}</span>
+        <span>Согласен с условиями участия и офертой Банного Ордена</span>
+      </button>
+      <button type="button" class="btn-primary" data-action="pay-submit" style="margin-top:12px" ${p.agree ? "" : "disabled"}>${btnLabel}</button>
+      <div class="pay-secure">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="2" stroke="#99A49E" stroke-width="1.4"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="#99A49E" stroke-width="1.4"/></svg>
+        ${free ? "Запись оформляется сразу — без перехода к оплате" : "Оплата через Продамус · защищённое соединение"}
+      </div>`;
+  }
+
+  function refreshPayBottom() {
+    const el = document.getElementById("pay-bottom");
+    if (!el || state.pay.phase !== "form") return;
+    el.innerHTML = payBottomHtml(state.pay, payTotals());
   }
 
   function renderPaymentSheet() {
     const body = document.getElementById("pay-body");
     const p = state.pay;
     const e = p.event ? withDate(p.event) : null;
-    const price = e ? e.price || "" : "";
-    const unitPrice = parsePriceRub(price);
     const maxTickets = (e && e.max_tickets) || 4;
     const qty = p.quantity || 1;
-    const total = unitPrice * qty;
 
     if (p.phase === "form") {
+      const t = payTotals();
+      p.points = t.points; // количество/промокод могли уменьшить допустимую сумму
       const rows = e
         ? [
             { label: "Событие", value: e.title },
@@ -1129,21 +1355,29 @@
             <button type="button" class="pay-qty-btn" data-action="pay-qty-inc" ${qty >= maxTickets ? "disabled" : ""} aria-label="Больше">+</button>
           </div>
         </div>
-        <div class="pay-total"><span>К оплате</span><span class="amount">${unitPrice ? formatPriceRub(total) : "—"}</span></div>
-        <button type="button" class="pay-agree" data-action="pay-agree">
-          <span class="pay-check${p.agree ? " checked" : ""}">${p.agree ? '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="#213902" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' : ""}</span>
-          <span>Согласен с условиями участия и офертой Банного Ордена</span>
-        </button>
-        <button type="button" class="btn-primary" data-action="pay-submit" style="margin-top:12px" ${p.agree ? "" : "disabled"}>Перейти к оплате${unitPrice ? " · " + formatPriceRub(total) : ""}</button>
-        <div class="pay-secure">
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="2" stroke="#99A49E" stroke-width="1.4"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="#99A49E" stroke-width="1.4"/></svg>
-          Оплата через Продамус · защищённое соединение
-        </div>`;
+        ${promoBlockHtml(p)}
+        ${p.balance > 0 ? pointsBlockHtml(p, t) : ""}
+        <div id="pay-bottom">${payBottomHtml(p, t)}</div>`;
     } else if (p.phase === "redirect") {
       body.innerHTML = `<div class="pay-spinner-wrap">
         <span class="spinner"></span>
         <span style="font-size:15px">Открываем защищённую страницу Продамус</span>
         <span class="hint">Сейчас откроется окно оплаты — после оплаты вернитесь в Telegram и откройте мини-апп заново</span>
+      </div>`;
+    } else if (p.phase === "processing") {
+      body.innerHTML = `<div class="pay-spinner-wrap">
+        <span class="spinner"></span>
+        <span style="font-size:15px">Оформляем запись</span>
+      </div>`;
+    } else if (p.phase === "paid") {
+      const notes = [];
+      if (p.paidWith && p.paidWith.points) notes.push(`Списано листиков: ${p.paidWith.points.toLocaleString("ru-RU")}`);
+      if (p.paidWith && p.paidWith.promo) notes.push(`Промокод ${escapeHtml(p.paidWith.promo)} применён`);
+      body.innerHTML = `<div class="pay-status">
+        <div class="pay-status-icon success"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M6 12.5l4 4 8-9" stroke="#8CB169" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="pay-status-title">Вы записаны</div>
+        <p class="pay-status-text">Запись подтверждена — оплата не потребовалась.${notes.length ? "<br>" + notes.join("<br>") : ""}</p>
+        <button type="button" class="btn-primary" data-action="pay-done" style="margin-top:18px">Готово</button>
       </div>`;
     } else if (p.phase === "fail") {
       body.innerHTML = `<div class="pay-status">
@@ -1156,24 +1390,73 @@
     }
   }
 
+  async function applyPromo() {
+    const p = state.pay;
+    const code = (p.promoInput || "").trim();
+    if (!code) {
+      p.promoError = "Введите промокод";
+      renderPaymentSheet();
+      return;
+    }
+    p.promoBusy = true;
+    p.promoError = "";
+    renderPaymentSheet();
+    try {
+      const data = await api("/promo/check", { method: "POST", body: { code, event_id: p.eventId } });
+      if (state.pay !== p) return;
+      p.promo = data;
+    } catch (err) {
+      if (state.pay !== p) return;
+      p.promo = null;
+      p.promoError = PROMO_ERRORS[err.message] || "Не удалось проверить промокод. Попробуйте ещё раз.";
+    }
+    p.promoBusy = false;
+    renderPaymentSheet();
+  }
+
   async function paySubmit() {
     const p = state.pay;
     if (p.phase === "form" && !p.agree) return;
-    p.phase = "redirect";
+    const t = payTotals();
+    p.phase = t.unit > 0 && t.due === 0 ? "processing" : "redirect";
     renderPaymentSheet();
     try {
-      const data = await api(`/events/${p.eventId}/signup`, { method: "POST", body: { quantity: p.quantity || 1 } });
-      if (state.pay.eventId !== p.eventId) return;
+      const data = await api(`/events/${p.eventId}/signup`, {
+        method: "POST",
+        body: { quantity: p.quantity || 1, promo_code: p.promo ? p.promo.code : "", points: t.points },
+      });
+      if (state.pay !== p) return;
+      // баланс листиков и статус записи поменялись — при следующем показе перечитаем
+      state.cache.wallet = null;
+      state.cache.events = null;
+      if (data.paid) {
+        p.paidWith = { points: t.points, promo: p.promo ? p.promo.code : "" };
+        p.phase = "paid";
+        renderPaymentSheet();
+        return;
+      }
       if (tg && tg.openLink) tg.openLink(data.payment_url);
       else window.location.href = data.payment_url;
     } catch (err) {
-      if (state.pay.eventId !== p.eventId) return;
-      state.pay.phase = "fail";
-      state.pay.errorMessage = err.message === "price_not_set"
+      if (state.pay !== p) return;
+      if (String(err.message).startsWith("promo_")) {
+        // промокод перестал подходить (закончился лимит, выключили) — возвращаем в форму
+        p.promo = null;
+        p.promoError = PROMO_ERRORS[err.message] || "Промокод не подошёл";
+        p.phase = "form";
+        renderPaymentSheet();
+        return;
+      }
+      p.phase = "fail";
+      p.errorMessage = err.message === "price_not_set"
         ? "Для этого события ещё не указана цена участия — обратитесь к администратору."
         : err.message === "already_registered"
           ? "Вы уже записаны на это событие."
-          : "Не удалось начать оплату. Попробуйте ещё раз.";
+          : err.message === "insufficient_points"
+            ? "Недостаточно листиков на балансе — закройте окно и откройте оплату заново."
+            : err.message === "invalid_points"
+              ? "Не удалось применить листики. Закройте окно и откройте оплату заново."
+              : "Не удалось начать оплату. Попробуйте ещё раз.";
       renderPaymentSheet();
     }
   }

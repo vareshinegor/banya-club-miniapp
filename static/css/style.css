@@ -1863,3 +1863,226 @@ input::placeholder, textarea::placeholder {
     margin-right: auto;
   }
 }
+
+/* ---------- Оплата: промокод, листики, итоги ---------- */
+
+.pay-sheet {
+  max-height: 92vh;
+  max-height: 92dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pay-promo,
+.pay-points {
+  margin-top: 16px;
+}
+
+.pay-inline {
+  display: flex;
+  gap: 8px;
+}
+
+.pay-input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: rgba(12, 8, 3, .42);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  box-sizing: border-box;
+}
+
+.pay-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.pay-input:disabled {
+  opacity: .7;
+}
+
+.pay-input[type="number"]::-webkit-outer-spin-button,
+.pay-input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.pay-input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+.pay-mini-btn {
+  flex: none;
+  height: 44px;
+  padding: 0 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(201, 151, 78, .4);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.pay-mini-btn:disabled {
+  opacity: .4;
+  cursor: default;
+}
+
+.pay-msg {
+  margin-top: 8px;
+  font-size: 12.5px;
+}
+
+.pay-msg.ok { color: var(--success); }
+.pay-msg.err { color: var(--danger); }
+
+.pay-points-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.pay-points-balance {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.pay-summary {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(12, 8, 3, .42);
+  border: 1px solid var(--border-soft);
+}
+
+/* ---------- Листики и рефералка (Профиль) ---------- */
+
+.wallet-card {
+  margin-top: 18px;
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-gold);
+}
+
+.wallet-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.wallet-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(140, 177, 105, .16);
+  color: var(--success);
+}
+
+.wallet-label {
+  font-size: 12px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.wallet-balance {
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--accent);
+}
+
+.wallet-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.wallet-ref {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.wallet-ref-title {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.wallet-ref-text {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.wallet-link {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(12, 8, 3, .42);
+  border: 1px solid var(--border-soft);
+  font-size: 12.5px;
+  color: var(--text-soft);
+  word-break: break-all;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+.wallet-ref-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.wallet-stats {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.wallet-hist {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.wallet-hist-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.wallet-hist-row em {
+  display: block;
+  margin-top: 2px;
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.wallet-hist-row .plus { color: var(--success); font-weight: 600; }
+.wallet-hist-row .minus { color: var(--text-soft); font-weight: 600; }

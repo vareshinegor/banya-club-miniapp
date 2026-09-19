@@ -1,7 +1,8 @@
 import json
+import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import gspread
@@ -9,12 +10,21 @@ from google.oauth2.service_account import Credentials
 
 from config import Config
 from constants import (
+    POINTS_REASON_ORDER,
+    POINTS_REASON_REFERRAL,
+    POINTS_REASON_REFUND,
+    POINTS_RESERVATION_TTL_MINUTES,
+    REFERRAL_REWARD_POINTS,
     SHEET_ACHIEVEMENTS,
     SHEET_EVENTS,
     SHEET_GENERAL,
     SHEET_MATERIALS,
+    SHEET_POINTS,
+    SHEET_PROMOCODES,
+    SHEET_REFERRALS,
     SHEET_SIGNUPS,
     SHEET_USERS,
+    SIGNUP_STATUS_FAILED,
     SIGNUP_STATUS_PAID,
     SIGNUP_STATUS_PENDING,
     SIGNUPS_HEADERS,
@@ -83,14 +93,41 @@ def get_worksheet(name: str):
     return _worksheets_by_name[name]
 
 
-def _rows_with_index(ws):
-    """Return (headers, [(row_number, record_dict), ...]) skipping the header row."""
+def _get_all_values(ws):
+    """ws.get_all_values() с повтором при 429 (лимит Google Sheets — 60 чтений в
+    минуту на сервисный аккаунт): короткий всплеск запросов не должен ронять
+    ответ пользователю ошибкой 500."""
+    for attempt in range(3):
+        try:
+            return ws.get_all_values()
+        except gspread.exceptions.APIError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status != 429 or attempt == 2:
+                raise
+            time.sleep(3 * (attempt + 1))
+
+
+# Для fresh=True: данные не старше этого срока считаем свежими. Полностью
+# обходить кэш нельзя — один заказ читает те же листы по 5-6 раз подряд и
+# упирался бы в лимит Google на чтения; 2 секунды при этом на порядок короче
+# обычных 8, так что запись из соседнего процесса видна почти сразу.
+_FRESH_TTL = 2.0
+
+
+def _rows_with_index(ws, fresh=False):
+    """Return (headers, [(row_number, record_dict), ...]) skipping the header row.
+    fresh=True — кэш не старше _FRESH_TTL вместо обычных 8 секунд: нужно там,
+    где решение зависит от денег (баланс листиков, резервы, лимиты
+    промокодов) — у каждого воркера gunicorn свой кэш, и запись из соседнего
+    процесса иначе была бы не видна до 8 секунд. Собственные записи сбрасывают
+    кэш листа сразу (_invalidate_sheet_cache)."""
     cached = _sheet_cache.get(ws.title)
     now = time.monotonic()
-    if cached and now - cached[0] < _SHEET_CACHE_TTL:
+    ttl = _FRESH_TTL if fresh else _SHEET_CACHE_TTL
+    if cached and now - cached[0] < ttl:
         values = cached[1]
     else:
-        values = ws.get_all_values()
+        values = _get_all_values(ws)
         _sheet_cache[ws.title] = (now, values)
     if not values:
         return [], []
@@ -104,6 +141,23 @@ def _rows_with_index(ws):
 
 def _now():
     return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def _to_int(value, default=0) -> int:
+    try:
+        return int(float(re.sub(r"\s", "", str(value)).replace(",", ".")))
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_stale(date_str: str) -> bool:
+    """Заказ старше POINTS_RESERVATION_TTL_MINUTES? Непонятная дата — не считаем
+    просроченной (лучше подержать резерв, чем вернуть листики по ошибке)."""
+    try:
+        created = datetime.strptime((date_str or "").strip(), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False
+    return datetime.now() - created > timedelta(minutes=POINTS_RESERVATION_TTL_MINUTES)
 
 
 # --- Пользователи -----------------------------------------------------
@@ -308,41 +362,51 @@ def get_signup_quantity(telegram_id, event_id) -> int:
     return 0
 
 
-def create_pending_signup(telegram_id, event_id, order_id: str, quantity: int = 1):
+def create_pending_signup(
+    telegram_id,
+    event_id,
+    order_id: str,
+    quantity: int = 1,
+    points: int = 0,
+    promo: str = "",
+    due: int = 0,
+    status: str = SIGNUP_STATUS_PENDING,
+):
     """Создаёт (или переиспользует существующую неоплаченную) строку записи
     со статусом "ожидает оплаты" перед тем, как отправить пользователя на
-    оплату — чтобы повторные попытки не плодили дубли строк. quantity
-    перезаписывается и при переиспользовании — пользователь мог поменять
-    число билетов между попытками оплаты."""
+    оплату — чтобы повторные попытки не плодили дубли строк. Количество,
+    листики, промокод и сумма перезаписываются и при переиспользовании —
+    пользователь мог поменять условия между попытками оплаты. status=PAID
+    используется для заказов, закрытых целиком листиками/промокодом (в
+    Продамус они не уходят)."""
     ws = get_worksheet(SHEET_SIGNUPS)
-    _, rows = _rows_with_index(ws)
+    _, rows = _rows_with_index(ws, fresh=True)
+    values = [
+        str(telegram_id), str(event_id), _now(), status, order_id, int(quantity),
+        int(points), promo or "", int(due),
+    ]
+    last_col = chr(ord("A") + len(SIGNUPS_HEADERS) - 1)
     for row_number, record in rows:
         if (
             str(record.get("telegram_id", "")) == str(telegram_id)
             and str(record.get("ID события", "")) == str(event_id)
             and record.get("Статус") != SIGNUP_STATUS_PAID
         ):
-            col = SIGNUPS_HEADERS.index("Статус") + 1
-            order_col = SIGNUPS_HEADERS.index("Заказ") + 1
-            date_col = SIGNUPS_HEADERS.index("Дата записи") + 1
-            qty_col = SIGNUPS_HEADERS.index("Количество") + 1
-            ws.update_cell(row_number, col, SIGNUP_STATUS_PENDING)
-            ws.update_cell(row_number, order_col, order_id)
-            ws.update_cell(row_number, date_col, _now())
-            ws.update_cell(row_number, qty_col, str(quantity))
+            ws.update(
+                range_name=f"A{row_number}:{last_col}{row_number}",
+                values=[values],
+                value_input_option="RAW",
+            )
             _invalidate_sheet_cache(SHEET_SIGNUPS)
             return
 
-    ws.append_row(
-        [str(telegram_id), str(event_id), _now(), SIGNUP_STATUS_PENDING, order_id, str(quantity)],
-        value_input_option="RAW",
-    )
+    ws.append_row(values, value_input_option="RAW")
     _invalidate_sheet_cache(SHEET_SIGNUPS)
 
 
-def find_signup_by_order(order_id: str) -> Optional[dict]:
+def find_signup_by_order(order_id: str, fresh: bool = False) -> Optional[dict]:
     ws = get_worksheet(SHEET_SIGNUPS)
-    _, rows = _rows_with_index(ws)
+    _, rows = _rows_with_index(ws, fresh=fresh)
     for row_number, record in rows:
         if record.get("Заказ") == order_id:
             record["_row"] = row_number
@@ -350,17 +414,221 @@ def find_signup_by_order(order_id: str) -> Optional[dict]:
     return None
 
 
-def set_signup_status(order_id: str, status: str) -> bool:
-    """Обновляет статус записи по order_id (из вебхука Продамуса).
-    Возвращает False, если строка с таким заказом не найдена."""
-    record = find_signup_by_order(order_id)
+def settle_signup(order_id: str, status: str) -> bool:
+    """Проставляет итоговый статус записи по order_id (вебхук Продамуса или
+    откат неудавшегося заказа) и приводит резерв листиков в соответствие:
+    оплачено — листики списаны, отклонено — возвращены. Безопасно вызывать
+    повторно (Продамус может прислать вебхук дважды) — см.
+    set_order_points_net. Возвращает False, если такого заказа нет."""
+    record = find_signup_by_order(order_id, fresh=True)
     if not record:
         return False
     ws = get_worksheet(SHEET_SIGNUPS)
-    col = SIGNUPS_HEADERS.index("Статус") + 1
-    ws.update_cell(record["_row"], col, status)
+    ws.update_cell(record["_row"], SIGNUPS_HEADERS.index("Статус") + 1, status)
     _invalidate_sheet_cache(SHEET_SIGNUPS)
+
+    points = _to_int(record.get("Листики"))
+    if points:
+        telegram_id = record.get("telegram_id")
+        if status == SIGNUP_STATUS_PAID:
+            set_order_points_net(telegram_id, order_id, -points)
+        elif status == SIGNUP_STATUS_FAILED:
+            set_order_points_net(telegram_id, order_id, 0)
     return True
+
+
+def release_event_reservation(telegram_id, event_id):
+    """Возвращает на баланс листики, зарезервированные под прошлую неоплаченную
+    попытку купить именно это событие — новая попытка перезапишет ту же строку,
+    и без этого шага резерв прошлой попытки уменьшал бы доступный баланс."""
+    ws = get_worksheet(SHEET_SIGNUPS)
+    _, rows = _rows_with_index(ws, fresh=True)
+    for _, record in rows:
+        if (
+            str(record.get("telegram_id", "")) == str(telegram_id)
+            and str(record.get("ID события", "")) == str(event_id)
+            and record.get("Статус") != SIGNUP_STATUS_PAID
+        ):
+            order_id = record.get("Заказ")
+            if order_id and _to_int(record.get("Листики")):
+                set_order_points_net(telegram_id, order_id, 0)
+
+
+def release_stale_reservations(telegram_id):
+    """Возвращает листики из неоплаченных заказов старше
+    POINTS_RESERVATION_TTL_MINUTES (человек закрыл страницу Продамуса). Сама
+    запись остаётся "ожидает оплаты": если оплата всё-таки придёт позже,
+    settle_signup снова спишет листики."""
+    ws = get_worksheet(SHEET_SIGNUPS)
+    _, rows = _rows_with_index(ws)  # уборка не критична по времени — обычный кэш
+    for _, record in rows:
+        if (
+            str(record.get("telegram_id", "")) == str(telegram_id)
+            and record.get("Статус") == SIGNUP_STATUS_PENDING
+            and _to_int(record.get("Листики"))
+            and _is_stale(record.get("Дата записи"))
+        ):
+            set_order_points_net(telegram_id, record.get("Заказ"), 0)
+
+
+# --- Листики (журнал операций) --------------------------------------------
+
+
+def _points_rows(telegram_id, fresh=False) -> list:
+    ws = get_worksheet(SHEET_POINTS)
+    _, rows = _rows_with_index(ws, fresh=fresh)
+    return [record for _, record in rows if str(record.get("telegram_id", "")) == str(telegram_id)]
+
+
+def get_points_balance(telegram_id, fresh: bool = False) -> int:
+    return sum(_to_int(r.get("Сумма")) for r in _points_rows(telegram_id, fresh=fresh))
+
+
+def list_points_history(telegram_id, limit: int = 10) -> list:
+    rows = _points_rows(telegram_id)
+    return [
+        {"amount": _to_int(r.get("Сумма")), "reason": r.get("Причина", ""), "date": r.get("Дата", "")}
+        for r in reversed(rows)
+    ][:limit]
+
+
+def add_points(telegram_id, amount: int, reason: str, ref: str = ""):
+    ws = get_worksheet(SHEET_POINTS)
+    ws.append_row([str(telegram_id), int(amount), reason, str(ref), _now()], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_POINTS)
+
+
+def order_points_net(telegram_id, order_id) -> int:
+    return sum(
+        _to_int(r.get("Сумма"))
+        for r in _points_rows(telegram_id, fresh=True)
+        if str(r.get("Ссылка", "")) == str(order_id)
+    )
+
+
+def set_order_points_net(telegram_id, order_id, target_net: int):
+    """Доводит сумму всех операций по заказу до target_net (0 — всё возвращено,
+    -N — N листиков списано). Дописывает только недостающую разницу, поэтому
+    повторный вызов (дубль вебхука, гонка) ничего не задваивает."""
+    delta = int(target_net) - order_points_net(telegram_id, order_id)
+    if delta:
+        add_points(telegram_id, delta, POINTS_REASON_ORDER if delta < 0 else POINTS_REASON_REFUND, order_id)
+
+
+# --- Рефералка --------------------------------------------------------------
+
+
+def record_referral(invited_id, referrer_id) -> bool:
+    """Фиксирует, кто привёл человека, при его первом открытии мини-аппа по
+    реферальной ссылке (first-touch: повторно не перезаписывается). Игнорирует
+    самоприглашение, несуществующего пригласившего и уже зарегистрированных."""
+    if str(invited_id) == str(referrer_id):
+        return False
+    if not find_user(referrer_id) or find_user(invited_id):
+        return False
+    ws = get_worksheet(SHEET_REFERRALS)
+    _, rows = _rows_with_index(ws, fresh=True)
+    if any(str(r.get("telegram_id", "")) == str(invited_id) for _, r in rows):
+        return False
+    ws.append_row([str(invited_id), str(referrer_id), _now(), ""], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_REFERRALS)
+    return True
+
+
+def grant_referral_reward(invited_id) -> bool:
+    """Начисляет пригласившему REFERRAL_REWARD_POINTS, когда анкету приглашённого
+    одобрили. Один раз на приглашённого: отметка "Награда" в листе "Рефералы"
+    плюс проверка по журналу листиков (на случай, если отметка не успела
+    записаться). Возвращает True, если награда начислена сейчас."""
+    ws = get_worksheet(SHEET_REFERRALS)
+    headers, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if str(record.get("telegram_id", "")) != str(invited_id):
+            continue
+        if (record.get("Награда") or "").strip():
+            return False
+        referrer_id = str(record.get("Пригласил", "")).strip()
+        if not referrer_id or not find_user(referrer_id):
+            return False
+        ref = f"ref:{invited_id}"
+        already = any(
+            str(r.get("Ссылка", "")) == ref and r.get("Причина") == POINTS_REASON_REFERRAL
+            for r in _points_rows(referrer_id, fresh=True)
+        )
+        if not already:
+            add_points(referrer_id, REFERRAL_REWARD_POINTS, POINTS_REASON_REFERRAL, ref)
+        ws.update_cell(row_number, headers.index("Награда") + 1, _now())
+        _invalidate_sheet_cache(SHEET_REFERRALS)
+        return not already
+    return False
+
+
+def settle_referral_rewards(referrer_id) -> int:
+    """Награды за приглашённых, которых одобрили не вебхуком, а вручную (админ
+    поменял "Статус" прямо в таблице) — вебхук в таком случае не приходит, и
+    без этой проверки листики бы не начислились никогда. Вызывается, когда
+    пригласивший открывает свой кошелёк. Возвращает, сколько наград начислено."""
+    ws = get_worksheet(SHEET_REFERRALS)
+    _, rows = _rows_with_index(ws)
+    approved = {STATUS_NON_RESIDENT.casefold(), STATUS_RESIDENT.casefold()}
+    granted = 0
+    for _, record in rows:
+        if str(record.get("Пригласил", "")) != str(referrer_id) or (record.get("Награда") or "").strip():
+            continue
+        invited = find_user(record.get("telegram_id"))
+        if invited and (invited.get("Статус") or "").strip().casefold() in approved:
+            if grant_referral_reward(record.get("telegram_id")):
+                granted += 1
+    return granted
+
+
+def referral_stats(referrer_id) -> dict:
+    ws = get_worksheet(SHEET_REFERRALS)
+    _, rows = _rows_with_index(ws)
+    mine = [r for _, r in rows if str(r.get("Пригласил", "")) == str(referrer_id)]
+    return {"total": len(mine), "rewarded": sum(1 for r in mine if (r.get("Награда") or "").strip())}
+
+
+# --- Промокоды --------------------------------------------------------------
+
+
+def find_promo(code: str, fresh: bool = False) -> Optional[dict]:
+    target = (code or "").strip().casefold()
+    if not target:
+        return None
+    ws = get_worksheet(SHEET_PROMOCODES)
+    _, rows = _rows_with_index(ws, fresh=fresh)
+    for _, record in rows:
+        if (record.get("Код") or "").strip().casefold() == target:
+            return record
+    return None
+
+
+def promo_uses(code: str, exclude_telegram_id=None, exclude_event_id=None) -> int:
+    """Сколько раз код уже применён: оплаченные записи + неоплаченные, но ещё не
+    просроченные (см. POINTS_RESERVATION_TTL_MINUTES). Считается по листу
+    "Записи", а не счётчиком в промокоде — отклонённые заказы сами перестают
+    учитываться. Неоплаченная попытка самого пользователя на это же событие
+    не считается — она будет перезаписана новой."""
+    target = (code or "").strip().casefold()
+    ws = get_worksheet(SHEET_SIGNUPS)
+    _, rows = _rows_with_index(ws, fresh=True)
+    uses = 0
+    for _, record in rows:
+        if (record.get("Промокод") or "").strip().casefold() != target:
+            continue
+        status = record.get("Статус")
+        if status == SIGNUP_STATUS_PAID:
+            uses += 1
+        elif status == SIGNUP_STATUS_PENDING and not _is_stale(record.get("Дата записи")):
+            own = (
+                exclude_telegram_id is not None
+                and str(record.get("telegram_id", "")) == str(exclude_telegram_id)
+                and str(record.get("ID события", "")) == str(exclude_event_id)
+            )
+            if not own:
+                uses += 1
+    return uses
 
 
 def list_attendees(event_id) -> list:

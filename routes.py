@@ -14,8 +14,12 @@ from config import Config
 from constants import (
     MAX_TICKETS_PER_SIGNUP,
     ONBOARDING_STEPS,
+    PROMO_TYPE_PERCENT,
+    PROMO_TYPE_RUB,
+    REFERRAL_REWARD_POINTS,
     SIGNUP_STATUS_FAILED,
     SIGNUP_STATUS_PAID,
+    SIGNUP_STATUS_PENDING,
     STATUS_NON_RESIDENT,
     STATUS_RESIDENT,
 )
@@ -148,6 +152,66 @@ def _normalize_phone(phone: str) -> str:
     return digits
 
 
+def _referral_link(telegram_id) -> str:
+    base = Config.MINIAPP_LINK.rstrip("/")
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}startapp=ref_{telegram_id}"
+
+
+def _reward_referrer(invited_id):
+    """Анкету приглашённого одобрили — начисляем листики пригласившему (один
+    раз, см. sheets.grant_referral_reward). Сбой здесь не должен ломать сам
+    вебхук: статус человека к этому моменту уже изменён."""
+    try:
+        sheets.grant_referral_reward(invited_id)
+    except Exception as exc:
+        print(f"[referral] не удалось начислить награду за {invited_id}: {exc}")
+
+
+def _promo_kind(promo: dict):
+    kind = (promo.get("Тип") or "").strip().casefold()
+    if kind == PROMO_TYPE_PERCENT:
+        return "percent"
+    if kind in (PROMO_TYPE_RUB, "руб", "₽", "рублей"):
+        return "rub"
+    return None
+
+
+def _promo_discount(promo: dict, total: int) -> int:
+    """Сколько рублей скидки даёт промокод на заказ суммой total (не больше
+    самой суммы). Процент — от всей суммы заказа, рубли — один раз на заказ."""
+    size = _parse_price_rub(str(promo.get("Размер") or ""))
+    kind = _promo_kind(promo)
+    if kind == "percent":
+        return min(total, int(round(total * min(max(size, 0), 100) / 100)))
+    if kind == "rub":
+        return min(total, int(round(max(size, 0))))
+    return 0
+
+
+def _check_promo(code: str, event_id, telegram_id, fresh: bool = False):
+    """(промокод, None) если код можно применить к событию, иначе (None, код_ошибки)."""
+    promo = sheets.find_promo(code, fresh=fresh)
+    if not promo:
+        return None, "promo_not_found"
+    if (promo.get("Активен") or "").strip().casefold() in ("нет", "no", "false", "0"):
+        return None, "promo_inactive"
+    if not _promo_kind(promo) or _parse_price_rub(str(promo.get("Размер") or "")) <= 0:
+        return None, "promo_invalid"
+    valid_until = _parse_date(promo.get("Действует до", ""))
+    if valid_until and datetime.now().date() > valid_until:
+        return None, "promo_expired"
+    scope = (promo.get("События") or "").strip().casefold()
+    if scope not in ("", "все", "all"):
+        allowed = {part for part in re.split(r"[,;\s]+", scope) if part}
+        if str(event_id) not in allowed:
+            return None, "promo_not_applicable"
+    limit_raw = (promo.get("Лимит") or "").strip()
+    if limit_raw and sheets.promo_uses(promo.get("Код"), telegram_id, event_id) >= int(_parse_price_rub(limit_raw)):
+        return None, "promo_exhausted"
+    return promo, None
+
+
 @api.route("/auth", methods=["POST"])
 def auth():
     data = request.get_json(silent=True) or {}
@@ -157,18 +221,28 @@ def auth():
     if Config.DEV_MODE and dev_id:
         telegram_id = dev_id
         username = f"dev_{dev_id}"
+        start_param = request.args.get("dev_start")
     else:
         parsed = telegram_auth.validate_init_data(init_data, Config.BOT_TOKEN)
         if not parsed:
             return jsonify({"error": "invalid_init_data"}), 401
         telegram_id = parsed["telegram_id"]
         username = parsed.get("username")
+        start_param = parsed.get("start_param")
 
     session["telegram_id"] = str(telegram_id)
     session["username"] = username
 
     user = sheets.find_user(telegram_id)
     if not user:
+        # Открыл мини-апп по чужой реферальной ссылке (?startapp=ref_<id>) —
+        # запоминаем, кто привёл, сразу: параметр приходит только при первом
+        # открытии по ссылке, а анкету человек может дозаполнить позже.
+        if start_param and str(start_param).startswith("ref_"):
+            try:
+                sheets.record_referral(telegram_id, str(start_param)[len("ref_"):])
+            except Exception as exc:
+                print(f"[referral] не удалось записать приглашение: {exc}")
         return jsonify({"status": "new", "steps": ONBOARDING_STEPS})
     return jsonify({"status": "active", "user": _public_user(user)})
 
@@ -368,6 +442,7 @@ def salebot_subscription_webhook():
 
     if not sheets.mark_subscription_paid(telegram_id, sb_id):
         return jsonify({"error": "user_not_found"}), 404
+    _reward_referrer(telegram_id)
     return jsonify({"status": "ok"})
 
 
@@ -389,6 +464,7 @@ def salebot_approve_webhook():
 
     if not sheets.mark_reviewed_non_resident(telegram_id, sb_id):
         return jsonify({"error": "user_not_found"}), 404
+    _reward_referrer(telegram_id)
     return jsonify({"status": "ok"})
 
 
@@ -534,24 +610,135 @@ def event_signup(event_id):
     if price <= 0:
         return jsonify({"error": "price_not_set"}), 400
 
-    order_id = f"{event_id}-{telegram_id}-{int(time.time())}"
-    sheets.create_pending_signup(telegram_id, event_id, order_id, quantity)
+    try:
+        points_requested = int(data.get("points") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid_points"}), 400
+    if points_requested < 0:
+        return jsonify({"error": "invalid_points"}), 400
 
+    # Резервы прошлых неоплаченных попыток (в т.ч. этого же события) сначала
+    # возвращаем на баланс — иначе они бы уменьшали доступную сумму.
+    sheets.release_stale_reservations(telegram_id)
+    sheets.release_event_reservation(telegram_id, event_id)
+
+    promo = None
+    promo_code = (data.get("promo_code") or "").strip()
+    if promo_code:
+        promo, promo_error = _check_promo(promo_code, event_id, telegram_id, fresh=True)
+        if promo_error:
+            return jsonify({"error": promo_error}), 400
+
+    base_total = int(round(price * quantity))
+    discount = _promo_discount(promo, base_total) if promo else 0
+    after_promo = base_total - discount
+    if points_requested > after_promo:
+        return jsonify({"error": "invalid_points"}), 400
+    if points_requested > sheets.get_points_balance(telegram_id, fresh=True):
+        return jsonify({"error": "insufficient_points"}), 400
+    due = after_promo - points_requested
+
+    order_id = f"{event_id}-{telegram_id}-{int(time.time())}"
+    promo_saved = promo.get("Код") if promo else ""
+
+    # Листики резервируем до записи: если человек параллельно тратит их где-то
+    # ещё, баланс уйдёт в минус — тогда откатываем и отказываем.
+    if points_requested:
+        sheets.set_order_points_net(telegram_id, order_id, -points_requested)
+        if sheets.get_points_balance(telegram_id, fresh=True) < 0:
+            sheets.set_order_points_net(telegram_id, order_id, 0)
+            return jsonify({"error": "insufficient_points"}), 400
+
+    try:
+        sheets.create_pending_signup(
+            telegram_id, event_id, order_id, quantity, points_requested, promo_saved, due,
+            SIGNUP_STATUS_PAID if due == 0 else SIGNUP_STATUS_PENDING,
+        )
+    except Exception:
+        sheets.set_order_points_net(telegram_id, order_id, 0)
+        raise
+
+    # Лимит промокода перепроверяем уже с собственной записью — закрывает гонку,
+    # когда два человека одновременно берут последнее применение.
+    if promo:
+        limit_raw = (promo.get("Лимит") or "").strip()
+        if limit_raw and sheets.promo_uses(promo_saved) > int(_parse_price_rub(limit_raw)):
+            sheets.settle_signup(order_id, SIGNUP_STATUS_FAILED)
+            return jsonify({"error": "promo_exhausted"}), 400
+
+    if due == 0:
+        return jsonify({"status": "ok", "paid": True})
+
+    title = event.get("Название", "") or "Участие в мероприятии"
     notification_url = request.url_root.rstrip("/") + "/api/webhooks/prodamus"
     try:
-        payment_url = prodamus_client.create_payment_link(
-            order_id=order_id,
-            title=event.get("Название", "") or "Участие в мероприятии",
-            price=price,
-            notification_url=notification_url,
-            quantity=quantity,
-            customer_phone=_normalize_phone(user.get("Телефон", "")),
-            customer_extra=f"telegram_id={telegram_id}",
-        )
+        if points_requested or discount:
+            # Со скидкой единая сумма одной строкой: цена за билет × количество
+            # после скидки не всегда делится нацело.
+            payment_url = prodamus_client.create_payment_link(
+                order_id=order_id,
+                title=f"{title} ×{quantity}" if quantity > 1 else title,
+                price=due,
+                notification_url=notification_url,
+                quantity=1,
+                customer_phone=_normalize_phone(user.get("Телефон", "")),
+                customer_extra=f"telegram_id={telegram_id}",
+            )
+        else:
+            payment_url = prodamus_client.create_payment_link(
+                order_id=order_id,
+                title=title,
+                price=price,
+                notification_url=notification_url,
+                quantity=quantity,
+                customer_phone=_normalize_phone(user.get("Телефон", "")),
+                customer_extra=f"telegram_id={telegram_id}",
+            )
     except RuntimeError as exc:
+        sheets.settle_signup(order_id, SIGNUP_STATUS_FAILED)
         return jsonify({"error": "payment_not_configured", "message": str(exc)}), 500
 
-    return jsonify({"status": "ok", "payment_url": payment_url})
+    return jsonify({"status": "ok", "payment_url": payment_url, "due": due})
+
+
+@api.route("/promo/check", methods=["POST"])
+def promo_check():
+    """Проверка промокода до оплаты — фронтенд показывает итоговую сумму со
+    скидкой. Окончательно код всё равно перепроверяется в /signup."""
+    telegram_id = _current_telegram_id()
+    if not telegram_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    promo, error = _check_promo(data.get("code") or "", data.get("event_id"), telegram_id)
+    if error:
+        return jsonify({"error": error}), 400
+    return jsonify({
+        "valid": True,
+        "code": promo.get("Код"),
+        "type": _promo_kind(promo),
+        "size": _parse_price_rub(str(promo.get("Размер") or "")),
+    })
+
+
+@api.route("/wallet", methods=["GET"])
+def wallet():
+    telegram_id = _current_telegram_id()
+    if not telegram_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    sheets.release_stale_reservations(telegram_id)
+    try:
+        sheets.settle_referral_rewards(telegram_id)
+    except Exception as exc:
+        print(f"[referral] не удалось сверить награды для {telegram_id}: {exc}")
+    return jsonify({
+        "balance": sheets.get_points_balance(telegram_id, fresh=True),
+        "reward": REFERRAL_REWARD_POINTS,
+        "referral_link": _referral_link(telegram_id),
+        "referrals": sheets.referral_stats(telegram_id),
+        "history": sheets.list_points_history(telegram_id, 10),
+    })
 
 
 @api.route("/webhooks/prodamus", methods=["POST"])
@@ -571,7 +758,7 @@ def prodamus_webhook():
         return jsonify({"error": "missing_order_id"}), 400
 
     status = SIGNUP_STATUS_PAID if payload.get("payment_status") == "success" else SIGNUP_STATUS_FAILED
-    sheets.set_signup_status(order_id, status)
+    sheets.settle_signup(order_id, status)
     return jsonify({"status": "ok"})
 
 

@@ -40,3 +40,9 @@ class Config:
     # (найденный по telegram_id через /api/webhooks/salebot до регистрации).
     # Если пусто — колбэк просто не отправляется.
     SALEBOT_ANKETA_DONE_URL = os.environ.get("SALEBOT_ANKETA_DONE_URL", "")
+
+    # Прямая ссылка на сам мини-апп — база для реферальных ссылок (бот слушает
+    # salebot, поэтому обычный /start у нас не приходит; работает только
+    # startapp-параметр прямой ссылки). Либо Main Mini App бота
+    # (https://t.me/<бот>), либо именованный апп (https://t.me/<бот>/<имя_аппа>).
+    MINIAPP_LINK = os.environ.get("MINIAPP_LINK", "https://t.me/banniy_orden_bot")

@@ -45,4 +45,7 @@ def validate_init_data(init_data: str, bot_token: str) -> Optional[dict]:
         "username": user.get("username"),
         "first_name": user.get("first_name"),
         "last_name": user.get("last_name"),
+        # start_param входит в подписанные Telegram данные — подделать его
+        # клиенту нельзя, поэтому по нему безопасно атрибутировать рефералов.
+        "start_param": data.get("start_param"),
     }

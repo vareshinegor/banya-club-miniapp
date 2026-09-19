@@ -10,6 +10,10 @@ from pathlib import Path
 
 os.environ["DEV_MODE"] = "true"
 os.environ["PORT"] = "5051"
+# Тестовый сервер не должен ходить в боевые внешние интеграции (CRM, salebot):
+# пустая переменная окружения отключает отправку и не перезаписывается .env.
+os.environ["WEBHOOK_URL"] = ""
+os.environ["SALEBOT_ANKETA_DONE_URL"] = ""
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
