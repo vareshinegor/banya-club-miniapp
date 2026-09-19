@@ -250,6 +250,10 @@
     showOnbPhase("form");
     renderOnbStep();
   });
+  document.getElementById("onb-go-main").addEventListener("click", () => {
+    showScreen("main");
+    switchTab("home");
+  });
   document.getElementById("onb-back").addEventListener("click", () => {
     syncOnbTextInputs();
     if (state.onb.index === 0) { showOnbPhase("intro"); return; }
