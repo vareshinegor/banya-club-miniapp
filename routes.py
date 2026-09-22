@@ -2,6 +2,7 @@ import os
 import re
 import time
 from datetime import datetime
+from typing import Optional
 
 from flask import Blueprint, jsonify, request, session
 
@@ -153,9 +154,16 @@ def _normalize_phone(phone: str) -> str:
 
 
 def _referral_link(telegram_id) -> str:
-    base = Config.MINIAPP_LINK.rstrip("/")
-    sep = "&" if "?" in base else "?"
-    return f"{base}{sep}startapp=ref_{telegram_id}"
+    """Ссылка на бота с параметром старта: salebot ловит "/start ref_<id>" и
+    присылает нам /api/webhooks/salebot/referral (см. salebot_referral_webhook)."""
+    return f"{Config.BOT_LINK.rstrip('/')}?start=ref_{telegram_id}"
+
+
+def _parse_ref_link(value) -> Optional[str]:
+    """Достаёт telegram_id пригласившего из "ref_<цифры>" — salebot может
+    прислать и сам параметр, и "/start ref_123", и целую ссылку."""
+    match = re.search(r"ref_(\d+)", str(value or ""))
+    return match.group(1) if match else None
 
 
 def _reward_referrer(invited_id):
@@ -221,28 +229,18 @@ def auth():
     if Config.DEV_MODE and dev_id:
         telegram_id = dev_id
         username = f"dev_{dev_id}"
-        start_param = request.args.get("dev_start")
     else:
         parsed = telegram_auth.validate_init_data(init_data, Config.BOT_TOKEN)
         if not parsed:
             return jsonify({"error": "invalid_init_data"}), 401
         telegram_id = parsed["telegram_id"]
         username = parsed.get("username")
-        start_param = parsed.get("start_param")
 
     session["telegram_id"] = str(telegram_id)
     session["username"] = username
 
     user = sheets.find_user(telegram_id)
     if not user:
-        # Открыл мини-апп по чужой реферальной ссылке (?startapp=ref_<id>) —
-        # запоминаем, кто привёл, сразу: параметр приходит только при первом
-        # открытии по ссылке, а анкету человек может дозаполнить позже.
-        if start_param and str(start_param).startswith("ref_"):
-            try:
-                sheets.record_referral(telegram_id, str(start_param)[len("ref_"):])
-            except Exception as exc:
-                print(f"[referral] не удалось записать приглашение: {exc}")
         return jsonify({"status": "new", "steps": ONBOARDING_STEPS})
     return jsonify({"status": "active", "user": _public_user(user)})
 
@@ -422,7 +420,49 @@ def salebot_webhook():
         return jsonify({"error": "missing_fields"}), 400
 
     sheets.save_platform_id(telegram_id, sb_id)
-    return jsonify({"status": "ok"})
+    response = {"status": "ok"}
+    # Если сценарий salebot уже шлёт сюда и ref_link — засчитываем приглашение
+    # тем же вызовом (то же самое, что отдельный /webhooks/salebot/referral).
+    if data.get("ref_link"):
+        response.update(_record_referral_from_webhook(telegram_id, data["ref_link"]))
+    return jsonify(response)
+
+
+def _record_referral_from_webhook(telegram_id, ref_link) -> dict:
+    referrer_id = _parse_ref_link(ref_link)
+    if not referrer_id:
+        return {"referral": "ignored", "reason": "no_ref_link"}
+    result = sheets.record_referral(telegram_id, referrer_id)
+    if result == "recorded":
+        return {"referral": "recorded"}
+    return {"referral": "ignored", "reason": result}
+
+
+@api.route("/webhooks/salebot/referral", methods=["POST"])
+def salebot_referral_webhook():
+    """Вебхук от salebot, когда человек стартовал бота по реферальной ссылке
+    (https://t.me/<бот>?start=ref_<telegram_id пригласившего>). Тело — то же,
+    что у стартового /webhooks/salebot (platform_id = telegram_id пришедшего,
+    client_id = их внутренний ID), плюс "ref_link" со значением "ref_<цифры>".
+
+    Связку telegram_id<->sb_id сохраняем тут же (если client_id пришёл), так что
+    для реферальных стартов достаточно одного этого вебхука. Приглашение
+    засчитывается один раз (первое касание), только для тех, кто ещё не
+    заполнил анкету. Награду пригласивший получает позже — когда анкету
+    приглашённого одобрят (/approve, /subscription). В ответе "referral" —
+    "recorded" или "ignored" + "reason", чтобы при настройке было видно причину."""
+    if not _webhook_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    telegram_id = data.get("platform_id") or data.get("telegram_id")
+    if not telegram_id:
+        return jsonify({"error": "missing_fields"}), 400
+
+    sb_id = data.get("client_id") or data.get("sb_id")
+    if sb_id:
+        sheets.save_platform_id(telegram_id, sb_id)
+    return jsonify({"status": "ok", **_record_referral_from_webhook(telegram_id, data.get("ref_link"))})
 
 
 @api.route("/webhooks/salebot/subscription", methods=["POST"])

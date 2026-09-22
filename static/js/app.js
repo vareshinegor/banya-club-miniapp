@@ -7,11 +7,7 @@
 
   const devParams = new URLSearchParams(window.location.search);
   const devId = devParams.get("dev_id");
-  // dev_start имитирует startapp-параметр реферальной ссылки (?startapp=ref_<id>) при отладке в браузере
-  const devStart = devParams.get("dev_start");
-  const authQuery = window.DEV_MODE && devId
-    ? `?dev_id=${encodeURIComponent(devId)}${devStart ? `&dev_start=${encodeURIComponent(devStart)}` : ""}`
-    : "";
+  const authQuery = window.DEV_MODE && devId ? `?dev_id=${encodeURIComponent(devId)}` : "";
 
   const screens = {
     loading: document.getElementById("screen-loading"),

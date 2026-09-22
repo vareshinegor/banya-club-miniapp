@@ -30,7 +30,7 @@ class Config:
     PRODAMUS_SECRET = os.environ.get("PRODAMUS_SECRET", "")
     # Куда Продамус вернёт пользователя после оплаты/отмены — обычно чат с ботом,
     # чтобы человек мог заново открыть мини-апп через кнопку меню.
-    PRODAMUS_RETURN_URL = os.environ.get("PRODAMUS_RETURN_URL", "https://t.me/banniy_orden_bot")
+    PRODAMUS_RETURN_URL = os.environ.get("PRODAMUS_RETURN_URL", "https://t.me/banniy_ordenbot")
 
     # Колбэк в salebot после того, как человек заполнил анкету в мини-аппе —
     # запускает у них следующий шаг сценария. Их API идентифицирует человека
@@ -41,8 +41,7 @@ class Config:
     # Если пусто — колбэк просто не отправляется.
     SALEBOT_ANKETA_DONE_URL = os.environ.get("SALEBOT_ANKETA_DONE_URL", "")
 
-    # Прямая ссылка на сам мини-апп — база для реферальных ссылок (бот слушает
-    # salebot, поэтому обычный /start у нас не приходит; работает только
-    # startapp-параметр прямой ссылки). Либо Main Mini App бота
-    # (https://t.me/<бот>), либо именованный апп (https://t.me/<бот>/<имя_аппа>).
-    MINIAPP_LINK = os.environ.get("MINIAPP_LINK", "https://t.me/banniy_orden_bot")
+    # Ссылка на бота — база для реферальных ссылок (<BOT_LINK>?start=ref_<id>).
+    # Бот слушает salebot: он ловит /start ref_<id> и шлёт нам вебхук
+    # /api/webhooks/salebot/referral, сама мини-аппа в этом не участвует.
+    BOT_LINK = os.environ.get("BOT_LINK", "https://t.me/banniy_ordenbot")

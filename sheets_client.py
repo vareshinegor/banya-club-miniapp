@@ -518,21 +518,26 @@ def set_order_points_net(telegram_id, order_id, target_net: int):
 # --- Рефералка --------------------------------------------------------------
 
 
-def record_referral(invited_id, referrer_id) -> bool:
-    """Фиксирует, кто привёл человека, при его первом открытии мини-аппа по
-    реферальной ссылке (first-touch: повторно не перезаписывается). Игнорирует
-    самоприглашение, несуществующего пригласившего и уже зарегистрированных."""
+def record_referral(invited_id, referrer_id) -> str:
+    """Фиксирует, кто привёл человека (salebot поймал /start ref_<id> и прислал
+    вебхук). First-touch: повторно не перезаписывается. Возвращает "recorded"
+    или причину отказа — её отдаёт вебхук, чтобы при настройке сценария в
+    salebot было видно, почему приглашение не засчиталось: "self" (сам себя),
+    "referrer_not_found" (пригласивший не в клубе), "already_registered"
+    (приглашённый уже заполнил анкету), "already_referred" (его уже кто-то привёл)."""
     if str(invited_id) == str(referrer_id):
-        return False
-    if not find_user(referrer_id) or find_user(invited_id):
-        return False
+        return "self"
+    if not find_user(referrer_id):
+        return "referrer_not_found"
+    if find_user(invited_id):
+        return "already_registered"
     ws = get_worksheet(SHEET_REFERRALS)
     _, rows = _rows_with_index(ws, fresh=True)
     if any(str(r.get("telegram_id", "")) == str(invited_id) for _, r in rows):
-        return False
+        return "already_referred"
     ws.append_row([str(invited_id), str(referrer_id), _now(), ""], value_input_option="RAW")
     _invalidate_sheet_cache(SHEET_REFERRALS)
-    return True
+    return "recorded"
 
 
 def grant_referral_reward(invited_id) -> bool:
