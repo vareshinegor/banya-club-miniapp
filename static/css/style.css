@@ -1864,7 +1864,7 @@ input::placeholder, textarea::placeholder {
   }
 }
 
-/* ---------- Оплата: промокод, листики, итоги ---------- */
+/* ---------- Оплата: промокод, дубики, итоги ---------- */
 
 .pay-sheet {
   max-height: 92vh;
@@ -1967,7 +1967,7 @@ input::placeholder, textarea::placeholder {
   border: 1px solid var(--border-soft);
 }
 
-/* ---------- Листики и рефералка (Профиль) ---------- */
+/* ---------- Дубики и рефералка (Профиль) ---------- */
 
 .wallet-card {
   margin-top: 18px;
@@ -1991,8 +1991,13 @@ input::placeholder, textarea::placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(140, 177, 105, .16);
-  color: var(--success);
+  background: rgba(201, 151, 78, .16);
+}
+
+.wallet-icon img {
+  width: 20px;
+  height: 25px;
+  object-fit: contain;
 }
 
 .wallet-label {

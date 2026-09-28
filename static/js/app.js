@@ -998,15 +998,15 @@
       : "";
     return `<div class="wallet-card">
       <div class="wallet-head">
-        <span class="wallet-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M5 19c0-8 5-13 14-14 0 9-5 14-13 14z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M5 19c2-4 5-7 9-9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+        <span class="wallet-icon"><img src="/static/img/dubik.png" alt="" width="20" height="25"></span>
         <div>
-          <div class="wallet-label">Листики</div>
+          <div class="wallet-label">Дубики</div>
           <div class="wallet-balance">${fmt(w.balance)}</div>
         </div>
       </div>
-      <p class="wallet-note">1 листик = 1 ₽. Ими можно оплатить часть или всю стоимость бани.</p>
+      <p class="wallet-note">1 дубик = 1 ₽. Ими можно оплатить часть или всю стоимость бани.</p>
       <div class="wallet-ref">
-        <div class="wallet-ref-title">Пригласите друга — ${fmt(w.reward)} листиков вам</div>
+        <div class="wallet-ref-title">Пригласите друга — ${fmt(w.reward)} дубиков вам</div>
         <div class="wallet-ref-text">Начислим, когда анкету друга одобрят. Друг должен открыть Банный Орден по вашей ссылке.</div>
         <div class="wallet-link">${escapeHtml(w.referral_link)}</div>
         <div class="wallet-ref-actions">
@@ -1256,7 +1256,7 @@
         renderPaymentSheet();
       }
     } catch (err) {
-      // без кошелька просто не показываем блок с листиками
+      // без кошелька просто не показываем блок с дубиками
     }
   }
 
@@ -1285,7 +1285,7 @@
 
   function pointsBlockHtml(p, t) {
     return `<div class="pay-points">
-      <div class="pay-points-head"><span>Оплатить листиками</span><span class="pay-points-balance">на балансе ${Math.floor(p.balance).toLocaleString("ru-RU")}</span></div>
+      <div class="pay-points-head"><span>Оплатить дубиками</span><span class="pay-points-balance">на балансе ${Math.floor(p.balance).toLocaleString("ru-RU")}</span></div>
       <div class="pay-inline">
         <input type="number" id="pay-points-input" class="pay-input" inputmode="numeric" min="0" max="${t.cap}" step="1" placeholder="0" value="${t.points || ""}">
         <button type="button" class="pay-mini-btn" data-action="pay-points-max"${t.cap <= 0 ? " disabled" : ""}>Максимум</button>
@@ -1294,11 +1294,11 @@
   }
 
   // Нижняя часть формы (итоги, согласие, кнопка) перерисовывается отдельно от
-  // полей ввода — иначе при наборе листиков поле теряло бы фокус на каждой цифре.
+  // полей ввода — иначе при наборе дубиков поле теряло бы фокус на каждой цифре.
   function payBottomHtml(p, t) {
     const lines = [];
     if (t.promoDiscount) lines.push(`<div class="pay-row"><span>Промокод ${escapeHtml(p.promo.code)}</span><span>−${formatPriceRub(t.promoDiscount)}</span></div>`);
-    if (t.points) lines.push(`<div class="pay-row"><span>Листики</span><span>−${formatPriceRub(t.points)}</span></div>`);
+    if (t.points) lines.push(`<div class="pay-row"><span>Дубики</span><span>−${formatPriceRub(t.points)}</span></div>`);
     const summary = lines.length
       ? `<div class="pay-summary"><div class="pay-row"><span>Стоимость</span><span>${formatPriceRub(t.base)}</span></div>${lines.join("")}</div>`
       : "";
@@ -1367,7 +1367,7 @@
       </div>`;
     } else if (p.phase === "paid") {
       const notes = [];
-      if (p.paidWith && p.paidWith.points) notes.push(`Списано листиков: ${p.paidWith.points.toLocaleString("ru-RU")}`);
+      if (p.paidWith && p.paidWith.points) notes.push(`Списано дубиков: ${p.paidWith.points.toLocaleString("ru-RU")}`);
       if (p.paidWith && p.paidWith.promo) notes.push(`Промокод ${escapeHtml(p.paidWith.promo)} применён`);
       body.innerHTML = `<div class="pay-status">
         <div class="pay-status-icon success"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M6 12.5l4 4 8-9" stroke="#8CB169" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
@@ -1422,7 +1422,7 @@
         body: { quantity: p.quantity || 1, promo_code: p.promo ? p.promo.code : "", points: t.points },
       });
       if (state.pay !== p) return;
-      // баланс листиков и статус записи поменялись — при следующем показе перечитаем
+      // баланс дубиков и статус записи поменялись — при следующем показе перечитаем
       state.cache.wallet = null;
       state.cache.events = null;
       if (data.paid) {
@@ -1449,9 +1449,9 @@
         : err.message === "already_registered"
           ? "Вы уже записаны на это событие."
           : err.message === "insufficient_points"
-            ? "Недостаточно листиков на балансе — закройте окно и откройте оплату заново."
+            ? "Недостаточно дубиков на балансе — закройте окно и откройте оплату заново."
             : err.message === "invalid_points"
-              ? "Не удалось применить листики. Закройте окно и откройте оплату заново."
+              ? "Не удалось применить дубики. Закройте окно и откройте оплату заново."
               : "Не удалось начать оплату. Попробуйте ещё раз.";
       renderPaymentSheet();
     }
