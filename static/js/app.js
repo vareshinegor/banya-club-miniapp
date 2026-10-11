@@ -1010,7 +1010,7 @@
           <div class="wallet-balance">${fmt(w.balance)}</div>
         </div>
       </div>
-      <p class="wallet-note">1 дубик = 1 ₽. Ими можно оплатить часть или всю стоимость бани.</p>
+      <p class="wallet-note">1 дубик = 1 ₽. Ими можно оплатить до ${w.points_max_percent == null ? 50 : w.points_max_percent}% стоимости мероприятия.</p>
       <div class="wallet-ref">
         <div class="wallet-ref-title">Пригласите друга — ${fmt(w.reward)} дубиков вам</div>
         <div class="wallet-ref-text">Начислим, когда анкету друга одобрят. Друг должен открыть Банный Орден по вашей ссылке.</div>
@@ -1228,7 +1228,9 @@
         : Math.min(base, Math.round(size));
     }
     const afterPromo = base - promoDiscount;
-    const cap = Math.max(0, Math.min(Math.floor(p.balance || 0), afterPromo));
+    // дубиками — не больше maxPercent% суммы после промокода (как на сервере)
+    const maxPercent = p.maxPercent == null ? 50 : p.maxPercent;
+    const cap = Math.max(0, Math.min(Math.floor(p.balance || 0), Math.floor((afterPromo * maxPercent) / 100)));
     const points = Math.max(0, Math.min(Math.floor(Number(p.points) || 0), cap));
     return { free, unit, base, promoDiscount, afterPromo, cap, points, due: afterPromo - points };
   }
@@ -1236,7 +1238,7 @@
   function newPayState(id) {
     return {
       eventId: id, phase: "form", agree: false, quantity: 1, event: findCachedEvent(id),
-      promoInput: "", promo: null, promoError: "", promoBusy: false, points: 0, balance: 0,
+      promoInput: "", promo: null, promoError: "", promoBusy: false, points: 0, balance: 0, maxPercent: 50,
     };
   }
 
@@ -1260,6 +1262,7 @@
       const wallet = await getWallet(true);
       if (state.pay === p && p.phase === "form") {
         p.balance = wallet.balance || 0;
+        if (wallet.points_max_percent != null) p.maxPercent = wallet.points_max_percent;
         renderPaymentSheet();
       }
     } catch (err) {
@@ -1297,6 +1300,7 @@
         <input type="number" id="pay-points-input" class="pay-input" inputmode="numeric" min="0" max="${t.cap}" step="1" placeholder="0" value="${t.points || ""}">
         <button type="button" class="pay-mini-btn" data-action="pay-points-max"${t.cap <= 0 ? " disabled" : ""}>Максимум</button>
       </div>
+      <div class="pay-points-hint">Можно оплатить до ${p.maxPercent}% стоимости мероприятия${t.cap > 0 ? ` — не больше ${t.cap.toLocaleString("ru-RU")}` : ""}</div>
     </div>`;
   }
 
@@ -1457,9 +1461,11 @@
           ? "Вы уже записаны на это событие."
           : err.message === "insufficient_points"
             ? "Недостаточно дубиков на балансе — закройте окно и откройте оплату заново."
-            : err.message === "invalid_points"
-              ? "Не удалось применить дубики. Закройте окно и откройте оплату заново."
-              : "Не удалось начать оплату. Попробуйте ещё раз.";
+            : err.message === "points_limit"
+              ? `Дубиками можно оплатить не больше ${p.maxPercent}% стоимости — закройте окно и откройте оплату заново.`
+              : err.message === "invalid_points"
+                ? "Не удалось применить дубики. Закройте окно и откройте оплату заново."
+                : "Не удалось начать оплату. Попробуйте ещё раз.";
       renderPaymentSheet();
     }
   }

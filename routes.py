@@ -15,6 +15,7 @@ from config import Config
 from constants import (
     MAX_TICKETS_PER_SIGNUP,
     ONBOARDING_STEPS,
+    POINTS_MAX_PERCENT,
     PROMO_TYPE_PERCENT,
     PROMO_TYPE_RUB,
     REFERRAL_REWARD_POINTS,
@@ -699,8 +700,10 @@ def event_signup(event_id):
     base_total = int(round(price * quantity))
     discount = _promo_discount(promo, base_total) if promo else 0
     after_promo = base_total - discount
-    if points_requested > after_promo:
-        return jsonify({"error": "invalid_points"}), 400
+    # Дубиками — не больше POINTS_MAX_PERCENT% от суммы после промокода (целая
+    # часть вниз), остальное человек платит деньгами.
+    if points_requested > after_promo * POINTS_MAX_PERCENT // 100:
+        return jsonify({"error": "points_limit"}), 400
     if points_requested > sheets.get_points_balance(telegram_id, fresh=True):
         return jsonify({"error": "insufficient_points"}), 400
     due = after_promo - points_requested
@@ -802,6 +805,7 @@ def wallet():
     return jsonify({
         "balance": sheets.get_points_balance(telegram_id, fresh=True),
         "reward": REFERRAL_REWARD_POINTS,
+        "points_max_percent": POINTS_MAX_PERCENT,
         "referral_link": _referral_link(telegram_id),
         "referrals": sheets.referral_stats(telegram_id),
         "history": sheets.list_points_history(telegram_id, 10),
