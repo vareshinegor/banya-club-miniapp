@@ -185,8 +185,9 @@
   function eventActionState(e) {
     if (e._past) return e.is_registered ? "attended" : "none";
     if (e.is_registered) return "joined";
-    if (e.can_signup) return "join";
-    return "locked";
+    if (!e.can_signup) return "locked";
+    // Цену ещё не вписали (и это не "Бесплатно") — записаться пока нельзя
+    return e.price ? "join" : "tbd";
   }
 
   function eventActionHtml(e, opts) {
@@ -198,6 +199,7 @@
     }
     if (st === "locked") return `<div class="state-btn state-locked"><svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="3" y="7" width="10" height="7" rx="2" stroke="#99A49E" stroke-width="1.5"/><path d="M5.5 7V5.5a2.5 2.5 0 015 0V7" stroke="#99A49E" stroke-width="1.5"/></svg>Доступно после проверки анкеты</div>`;
     if (st === "attended") return `<div class="state-btn state-attended">Вы посетили</div>`;
+    if (st === "tbd") return `<div class="state-btn state-locked">Стоимость уточняется</div>`;
     if (st === "join") {
       const label = sticky && e.price ? `Записаться · ${escapeHtml(e.price)}` : "Записаться";
       return `<button class="state-btn state-join" data-join-id="${e.id}">${label}</button>`;
@@ -921,11 +923,15 @@
 
   function materialCardHtml(m) {
     const linkAttr = m.link ? ` data-material-link="${escapeHtml(m.link)}"` : "";
-    const cover = m.photo
-      ? `<div class="card-cover"><img src="${escapeHtml(m.photo)}" alt="" loading="lazy" onerror="this.closest('.card-cover').remove()"></div>`
-      : "";
+    if (m.photo) {
+      // Обложка-постер уже содержит название и подпись — показываем одну картинку
+      // целиком, без текста под ней. Если файл не загрузится, вместо пустой
+      // карточки подставляем название.
+      return `<div class="card card-photo${m.link ? " clickable" : ""}"${linkAttr}>
+        <img src="${escapeHtml(m.photo)}" alt="${escapeHtml(m.title)}" loading="lazy" onerror="var d=document.createElement('div');d.className='card-photo-fallback';d.textContent=this.alt;this.replaceWith(d)">
+      </div>`;
+    }
     return `<div class="card${m.link ? " clickable" : ""}"${linkAttr}>
-      ${cover}
       <div style="display:flex;gap:12px;align-items:flex-start">
         <div style="min-width:0;flex:1">
           <div style="font-size:16px;font-weight:500;line-height:1.32">${escapeHtml(m.title)}</div>
@@ -1210,6 +1216,7 @@
   // сам и не верит числам с клиента) — тут только чтобы человек видел сумму заранее.
   function payTotals() {
     const p = state.pay;
+    const free = !!(p.event && p.event.is_free); // "Бесплатно" — без оплаты, промокодов и дубиков
     const unit = p.event ? parsePriceRub(p.event.price) : 0;
     const qty = p.quantity || 1;
     const base = Math.round(unit * qty);
@@ -1223,7 +1230,7 @@
     const afterPromo = base - promoDiscount;
     const cap = Math.max(0, Math.min(Math.floor(p.balance || 0), afterPromo));
     const points = Math.max(0, Math.min(Math.floor(Number(p.points) || 0), cap));
-    return { unit, base, promoDiscount, afterPromo, cap, points, due: afterPromo - points };
+    return { free, unit, base, promoDiscount, afterPromo, cap, points, due: afterPromo - points };
   }
 
   function newPayState(id) {
@@ -1302,10 +1309,10 @@
     const summary = lines.length
       ? `<div class="pay-summary"><div class="pay-row"><span>Стоимость</span><span>${formatPriceRub(t.base)}</span></div>${lines.join("")}</div>`
       : "";
-    const free = t.unit > 0 && t.due === 0;
-    const btnLabel = !t.unit ? "Перейти к оплате" : free ? "Записаться" : `Перейти к оплате · ${formatPriceRub(t.due)}`;
+    const free = t.free || (t.unit > 0 && t.due === 0);
+    const btnLabel = free ? "Записаться" : !t.unit ? "Перейти к оплате" : `Перейти к оплате · ${formatPriceRub(t.due)}`;
     return `${summary}
-      <div class="pay-total"><span>К оплате</span><span class="amount">${t.unit ? formatPriceRub(t.due) : "—"}</span></div>
+      <div class="pay-total"><span>К оплате</span><span class="amount">${t.free ? "Бесплатно" : t.unit ? formatPriceRub(t.due) : "—"}</span></div>
       <button type="button" class="pay-agree" data-action="pay-agree">
         <span class="pay-check${p.agree ? " checked" : ""}">${p.agree ? '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="#213902" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' : ""}</span>
         <span>Согласен с условиями участия и офертой Банного Ордена</span>
@@ -1351,8 +1358,8 @@
             <button type="button" class="pay-qty-btn" data-action="pay-qty-inc" ${qty >= maxTickets ? "disabled" : ""} aria-label="Больше">+</button>
           </div>
         </div>
-        ${promoBlockHtml(p)}
-        ${p.balance > 0 ? pointsBlockHtml(p, t) : ""}
+        ${t.free ? "" : promoBlockHtml(p)}
+        ${!t.free && p.balance > 0 ? pointsBlockHtml(p, t) : ""}
         <div id="pay-bottom">${payBottomHtml(p, t)}</div>`;
     } else if (p.phase === "redirect") {
       body.innerHTML = `<div class="pay-spinner-wrap">
@@ -1414,7 +1421,7 @@
     const p = state.pay;
     if (p.phase === "form" && !p.agree) return;
     const t = payTotals();
-    p.phase = t.unit > 0 && t.due === 0 ? "processing" : "redirect";
+    p.phase = t.free || (t.unit > 0 && t.due === 0) ? "processing" : "redirect";
     renderPaymentSheet();
     try {
       const data = await api(`/events/${p.eventId}/signup`, {

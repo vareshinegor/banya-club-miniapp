@@ -341,6 +341,29 @@ button, input, textarea {
   background: #33443C;
 }
 
+/* Материал-постер: одна картинка целиком, без текста под ней */
+.card.card-photo {
+  padding: 0;
+  overflow: hidden;
+}
+
+.card.card-photo.clickable:active {
+  filter: brightness(.92);
+}
+
+.card-photo img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.card-photo-fallback {
+  padding: 16px;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.32;
+}
+
 .card-title {
   font-family: var(--serif);
   font-weight: 600;

@@ -146,6 +146,17 @@ def _parse_price_rub(price_str: str) -> float:
         return 0.0
 
 
+def _is_free_price(price_str) -> bool:
+    """В "Цена" написано "Бесплатно" (или явный 0) — запись оформляется сразу,
+    без Продамуса. Пустая цена — это "ещё не указана", а не бесплатно."""
+    value = (price_str or "").strip().casefold()
+    if not value:
+        return False
+    if value in ("бесплатно", "free"):
+        return True
+    return bool(re.search(r"\d", value)) and _parse_price_rub(value) == 0
+
+
 def _normalize_phone(phone: str) -> str:
     digits = re.sub(r"\D", "", phone or "")
     if len(digits) == 11 and digits.startswith("8"):
@@ -519,6 +530,7 @@ def _event_price_for_tier(event: dict, tier: str) -> str:
 
 
 def _public_event(e: dict, is_registered: bool, can_signup: bool, tier: str, registered_quantity: int = 0) -> dict:
+    price = _event_price_for_tier(e, tier)
     return {
         "id": e["id"],
         "title": e.get("Название", ""),
@@ -526,7 +538,8 @@ def _public_event(e: dict, is_registered: bool, can_signup: bool, tier: str, reg
         "date": e.get("Дата", ""),
         "time": e.get("Время", ""),
         "place": e.get("Место", ""),
-        "price": _event_price_for_tier(e, tier),
+        "price": price,
+        "is_free": _is_free_price(price),
         "photo": e.get("Фото", ""),
         "photo_dark": e.get("Фото темное", "") or e.get("Фото", ""),
         "is_registered": is_registered,
@@ -646,7 +659,21 @@ def event_signup(event_id):
     if not 1 <= quantity <= MAX_TICKETS_PER_SIGNUP:
         return jsonify({"error": "invalid_quantity"}), 400
 
-    price = _parse_price_rub(_event_price_for_tier(event, tier))
+    price_raw = _event_price_for_tier(event, tier)
+    if _is_free_price(price_raw):
+        # Бесплатное событие (например, Zoom-разговор): сразу "оплачено" с нулём
+        # к оплате. Промокоды и дубики тут не нужны — клиент их не показывает, а
+        # если их всё же прислали, игнорируем: списывать нечего. Резерв дубиков
+        # от прошлой платной попытки (если цену потом сделали "Бесплатно")
+        # возвращаем, иначе он навсегда завис бы на балансе.
+        sheets.release_event_reservation(telegram_id, event_id)
+        sheets.create_pending_signup(
+            telegram_id, event_id, f"{event_id}-{telegram_id}-{int(time.time())}", quantity,
+            0, "", 0, SIGNUP_STATUS_PAID,
+        )
+        return jsonify({"status": "ok", "paid": True, "free": True})
+
+    price = _parse_price_rub(price_raw)
     if price <= 0:
         return jsonify({"error": "price_not_set"}), 400
 
