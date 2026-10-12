@@ -4,6 +4,7 @@ from flask import Flask, make_response, render_template, request, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
+from admin_routes import admin
 from routes import api
 
 
@@ -30,6 +31,7 @@ def create_app():
     app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 
     app.register_blueprint(api)
+    app.register_blueprint(admin)
 
     @app.after_request
     def fix_font_mimetype(response):

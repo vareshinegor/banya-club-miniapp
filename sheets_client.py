@@ -7,15 +7,19 @@ from typing import Optional
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.utils import rowcol_to_a1
 
 from config import Config
 from constants import (
+    ADMIN_LOG_HEADERS,
+    EVENTS_HEADERS,
     POINTS_REASON_ORDER,
     POINTS_REASON_REFERRAL,
     POINTS_REASON_REFUND,
     POINTS_RESERVATION_TTL_MINUTES,
     REFERRAL_REWARD_POINTS,
     SHEET_ACHIEVEMENTS,
+    SHEET_ADMIN_LOG,
     SHEET_EVENTS,
     SHEET_GENERAL,
     SHEET_MATERIALS,
@@ -695,3 +699,379 @@ def list_achievements_for_user(telegram_id) -> list:
     ws = get_worksheet(SHEET_ACHIEVEMENTS)
     _, rows = _rows_with_index(ws)
     return [record for _, record in rows if str(record.get("telegram_id", "")) == str(telegram_id)]
+
+
+# ============================================================================
+# Админ-панель (/admin). Всё ниже используется только admin_routes.py.
+# Правки по строке всегда делаем по СВЕЖЕМУ чтению (fresh=True) и ищем строку по
+# id/коду, а не по номеру из списка, который админ открыл минуту назад: таблицу
+# параллельно правят вручную и вебхуки, номера строк могли поехать.
+# ============================================================================
+
+
+def ensure_worksheet(title: str, headers: list):
+    """Лист по имени; если вкладки нет — создаёт её и пишет заголовки."""
+    try:
+        return get_worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        try:
+            ws = get_spreadsheet().add_worksheet(title=title, rows=1000, cols=max(len(headers), 5))
+            ws.update(range_name="A1", values=[headers])
+        except gspread.exceptions.APIError:
+            # соседний воркер успел создать вкладку первым
+            _worksheets_by_name.pop(title, None)
+            return get_worksheet(title)
+        _worksheets_by_name[title] = ws
+        return ws
+
+
+
+def _delete_row(ws, row_number: int):
+    """Удаляет строку. delete_rows работает по ID вкладки, а хэндлы вкладок мы
+    кэшируем на весь срок жизни процесса: если вкладку пересоздали (удалили и
+    завели заново), ID в кэше устарел и Google отвечает "No grid with id" —
+    тогда берём свежий хэндл и повторяем один раз."""
+    try:
+        ws.delete_rows(row_number)
+    except gspread.exceptions.APIError as exc:
+        if "No grid with id" not in str(exc):
+            raise
+        _worksheets_by_name.pop(ws.title, None)
+        get_worksheet(ws.title).delete_rows(row_number)
+
+
+def _cell_updates(headers: list, row_number: int, values: dict) -> list:
+    """{заголовок: значение} -> список для ws.batch_update (одним запросом)."""
+    return [
+        {"range": rowcol_to_a1(row_number, headers.index(header) + 1), "values": [[str(value)]]}
+        for header, value in values.items()
+        if header in headers
+    ]
+
+
+# --- Админка: люди --------------------------------------------------------
+
+
+def list_users() -> list:
+    ws = get_worksheet(SHEET_USERS)
+    _, rows = _rows_with_index(ws)
+    users = []
+    for row_number, record in rows:
+        if not str(record.get("telegram_id", "")).strip():
+            continue
+        record["_row"] = row_number
+        users.append(record)
+    return users
+
+
+def update_user_fields(telegram_id, values: dict) -> bool:
+    """Меняет перечисленные колонки анкеты (заголовки как в таблице). False,
+    если такого пользователя нет."""
+    ws = get_worksheet(SHEET_USERS)
+    headers, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if str(record.get("telegram_id", "")) == str(telegram_id):
+            data = _cell_updates(headers, row_number, values)
+            if data:
+                ws.batch_update(data)
+                _invalidate_sheet_cache(SHEET_USERS)
+            return True
+    return False
+
+
+def delete_user(telegram_id) -> bool:
+    ws = get_worksheet(SHEET_USERS)
+    _, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if str(record.get("telegram_id", "")) == str(telegram_id):
+            _delete_row(ws, row_number)
+            _invalidate_sheet_cache(SHEET_USERS)
+            return True
+    return False
+
+
+def points_balances() -> dict:
+    """{telegram_id: баланс дубиков} по всему журналу — одним чтением."""
+    ws = get_worksheet(SHEET_POINTS)
+    _, rows = _rows_with_index(ws)
+    totals = {}
+    for _, record in rows:
+        tid = str(record.get("telegram_id", ""))
+        if tid:
+            totals[tid] = totals.get(tid, 0) + _to_int(record.get("Сумма"))
+    return totals
+
+
+def list_points_ledger(telegram_id=None, limit: int = 300) -> list:
+    """Операции с дубиками, новые сверху (по одному человеку или по всем)."""
+    ws = get_worksheet(SHEET_POINTS)
+    _, rows = _rows_with_index(ws)
+    items = [
+        {
+            "telegram_id": str(r.get("telegram_id", "")),
+            "amount": _to_int(r.get("Сумма")),
+            "reason": r.get("Причина", ""),
+            "ref": r.get("Ссылка", ""),
+            "date": r.get("Дата", ""),
+        }
+        for _, r in rows
+        if telegram_id is None or str(r.get("telegram_id", "")) == str(telegram_id)
+    ]
+    items.reverse()
+    return items[:limit]
+
+
+def list_referrals() -> list:
+    ws = get_worksheet(SHEET_REFERRALS)
+    _, rows = _rows_with_index(ws)
+    return [record for _, record in rows if str(record.get("telegram_id", "")).strip()]
+
+
+def add_achievement(telegram_id, title: str, description: str, date: str):
+    ws = get_worksheet(SHEET_ACHIEVEMENTS)
+    ws.append_row([str(telegram_id), title, description, date], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_ACHIEVEMENTS)
+
+
+def delete_achievement(telegram_id, title: str, date: str) -> bool:
+    ws = get_worksheet(SHEET_ACHIEVEMENTS)
+    _, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (
+            str(record.get("telegram_id", "")) == str(telegram_id)
+            and (record.get("Название") or "") == title
+            and (record.get("Дата") or "") == date
+        ):
+            _delete_row(ws, row_number)
+            _invalidate_sheet_cache(SHEET_ACHIEVEMENTS)
+            return True
+    return False
+
+
+# --- Админка: записи на события --------------------------------------------
+
+
+def list_signups_all() -> list:
+    """Все записи (любого статуса) с номером строки."""
+    ws = get_worksheet(SHEET_SIGNUPS)
+    _, rows = _rows_with_index(ws)
+    items = []
+    for row_number, record in rows:
+        if not str(record.get("telegram_id", "")).strip():
+            continue
+        record["_row"] = row_number
+        items.append(record)
+    return items
+
+
+def admin_add_signup(telegram_id, event_id, quantity: int = 1) -> str:
+    """Записывает человека вручную (оплатил переводом, гость и т.п.): сразу
+    "оплачено", к оплате 0 — Продамус не задействован."""
+    order_id = f"admin-{event_id}-{telegram_id}-{int(time.time())}"
+    create_pending_signup(telegram_id, event_id, order_id, quantity, 0, "", 0, SIGNUP_STATUS_PAID)
+    return order_id
+
+
+def cancel_signup(telegram_id, event_id) -> Optional[dict]:
+    """Отменяет запись (статус "отклонено") и возвращает на баланс дубики, если
+    они были списаны. Деньги, оплаченные через Продамус, возвращаются вручную в
+    кабинете Продамуса — отсюда это не сделать. Возвращает отменённую запись."""
+    ws = get_worksheet(SHEET_SIGNUPS)
+    headers, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (
+            str(record.get("telegram_id", "")) == str(telegram_id)
+            and str(record.get("ID события", "")) == str(event_id)
+            and record.get("Статус") != SIGNUP_STATUS_FAILED
+        ):
+            ws.update_cell(row_number, headers.index("Статус") + 1, SIGNUP_STATUS_FAILED)
+            _invalidate_sheet_cache(SHEET_SIGNUPS)
+            order_id = record.get("Заказ")
+            if order_id and _to_int(record.get("Листики")):
+                set_order_points_net(telegram_id, order_id, 0)
+            return record
+    return None
+
+
+# --- Админка: афиша -------------------------------------------------------
+
+
+def admin_list_events() -> list:
+    """Все события вместе с номером строки (после того, как list_events() при
+    необходимости проставил недостающие ID)."""
+    list_events()
+    ws = get_worksheet(SHEET_EVENTS)
+    _, rows = _rows_with_index(ws)
+    events = []
+    for row_number, record in rows:
+        if not (record.get("Название") or "").strip():
+            continue
+        record["id"] = (record.get("ID") or "").strip()
+        record["_row"] = row_number
+        events.append(record)
+    return events
+
+
+def add_event(values: dict) -> dict:
+    ws = get_worksheet(SHEET_EVENTS)
+    headers, rows = _rows_with_index(ws, fresh=True)
+    max_id = max(
+        [int(r["ID"]) for _, r in rows if str(r.get("ID", "")).strip().isdigit()] or [0]
+    )
+    record = {h: "" for h in headers}
+    record.update({k: v for k, v in values.items() if k in EVENTS_HEADERS and k != "ID"})
+    record["ID"] = str(max_id + 1)
+    ws.append_row([record.get(h, "") for h in headers], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_EVENTS)
+    record["id"] = record["ID"]
+    return record
+
+
+def update_event(event_id, values: dict) -> bool:
+    ws = get_worksheet(SHEET_EVENTS)
+    headers, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (record.get("ID") or "").strip() == str(event_id):
+            data = _cell_updates(headers, row_number, {k: v for k, v in values.items() if k != "ID"})
+            if data:
+                ws.batch_update(data)
+                _invalidate_sheet_cache(SHEET_EVENTS)
+            return True
+    return False
+
+
+def delete_event(event_id) -> bool:
+    ws = get_worksheet(SHEET_EVENTS)
+    _, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (record.get("ID") or "").strip() == str(event_id):
+            _delete_row(ws, row_number)
+            _invalidate_sheet_cache(SHEET_EVENTS)
+            return True
+    return False
+
+
+# --- Админка: промокоды ---------------------------------------------------
+
+
+def list_promos() -> list:
+    ws = get_worksheet(SHEET_PROMOCODES)
+    _, rows = _rows_with_index(ws)
+    return [record for _, record in rows if (record.get("Код") or "").strip()]
+
+
+def promo_usage_map() -> dict:
+    """{код в нижнем регистре: сколько раз применён} — оплаченные записи и ещё
+    не просроченные неоплаченные (как promo_uses, но по всем кодам за раз)."""
+    ws = get_worksheet(SHEET_SIGNUPS)
+    _, rows = _rows_with_index(ws)
+    uses = {}
+    for _, record in rows:
+        code = (record.get("Промокод") or "").strip().casefold()
+        if not code:
+            continue
+        status = record.get("Статус")
+        if status == SIGNUP_STATUS_PAID or (status == SIGNUP_STATUS_PENDING and not _is_stale(record.get("Дата записи"))):
+            uses[code] = uses.get(code, 0) + 1
+    return uses
+
+
+def add_promo(values: dict):
+    ws = get_worksheet(SHEET_PROMOCODES)
+    headers, _ = _rows_with_index(ws, fresh=True)
+    ws.append_row([values.get(h, "") for h in headers], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_PROMOCODES)
+
+
+def update_promo(code: str, values: dict) -> bool:
+    ws = get_worksheet(SHEET_PROMOCODES)
+    headers, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (record.get("Код") or "").strip().casefold() == code.strip().casefold():
+            data = _cell_updates(headers, row_number, values)
+            if data:
+                ws.batch_update(data)
+                _invalidate_sheet_cache(SHEET_PROMOCODES)
+            return True
+    return False
+
+
+def delete_promo(code: str) -> bool:
+    ws = get_worksheet(SHEET_PROMOCODES)
+    _, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (record.get("Код") or "").strip().casefold() == code.strip().casefold():
+            _delete_row(ws, row_number)
+            _invalidate_sheet_cache(SHEET_PROMOCODES)
+            return True
+    return False
+
+
+# --- Админка: материалы ---------------------------------------------------
+# У материалов нет ID-колонки (строки заводят и вручную), поэтому правим по
+# номеру строки, но только если в ней всё ещё то название, которое админ видел —
+# иначе строки успели сдвинуть, и молча править чужую нельзя.
+
+
+def _material_row(ws, row_number: int, expect_title: str):
+    headers, rows = _rows_with_index(ws, fresh=True)
+    for number, record in rows:
+        if number == row_number and (record.get("Название") or "") == expect_title:
+            return headers
+    return None
+
+
+def add_material(values: dict):
+    ws = get_worksheet(SHEET_MATERIALS)
+    headers, _ = _rows_with_index(ws, fresh=True)
+    ws.append_row([values.get(h, "") for h in headers], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_MATERIALS)
+
+
+def update_material(row_number: int, expect_title: str, values: dict) -> bool:
+    ws = get_worksheet(SHEET_MATERIALS)
+    headers = _material_row(ws, row_number, expect_title)
+    if headers is None:
+        return False
+    data = _cell_updates(headers, row_number, values)
+    if data:
+        ws.batch_update(data)
+        _invalidate_sheet_cache(SHEET_MATERIALS)
+    return True
+
+
+def delete_material(row_number: int, expect_title: str) -> bool:
+    ws = get_worksheet(SHEET_MATERIALS)
+    if _material_row(ws, row_number, expect_title) is None:
+        return False
+    _delete_row(ws, row_number)
+    _invalidate_sheet_cache(SHEET_MATERIALS)
+    return True
+
+
+# --- Админка: журнал действий ---------------------------------------------
+
+
+def log_admin_action(admin: str, action: str, target: str = "", details: str = ""):
+    """Пишет строку в лист «Журнал». Сбой журнала не должен ломать само действие."""
+    try:
+        ws = ensure_worksheet(SHEET_ADMIN_LOG, ADMIN_LOG_HEADERS)
+        ws.append_row([_now(), admin, action, target, str(details)[:900]], value_input_option="RAW")
+        _invalidate_sheet_cache(SHEET_ADMIN_LOG)
+    except Exception as exc:
+        print(f"[admin-log] не удалось записать в журнал: {exc}")
+
+
+def list_admin_log(limit: int = 300) -> list:
+    try:
+        ws = ensure_worksheet(SHEET_ADMIN_LOG, ADMIN_LOG_HEADERS)
+    except Exception:
+        return []
+    _, rows = _rows_with_index(ws)
+    items = [
+        {"time": r.get("Время", ""), "admin": r.get("Админ", ""), "action": r.get("Действие", ""),
+         "target": r.get("Объект", ""), "details": r.get("Детали", "")}
+        for _, r in rows
+    ]
+    items.reverse()
+    return items[:limit]

@@ -1,13 +1,22 @@
+import os
+
 # Названия листов Google Таблицы — должны совпадать с реальными вкладками таблицы.
-SHEET_USERS = "Пользователи"
-SHEET_EVENTS = "Афиша"
-SHEET_SIGNUPS = "Записи"
-SHEET_MATERIALS = "Материалы"
-SHEET_ACHIEVEMENTS = "Достижения"
-SHEET_GENERAL = "Общие"
-SHEET_POINTS = "Листики"
-SHEET_REFERRALS = "Рефералы"
-SHEET_PROMOCODES = "Промокоды"
+# SHEET_PREFIX (переменная окружения) нужен только для тестов: с префиксом
+# "TEST_" приложение работает на вкладках "TEST_Пользователи", "TEST_Афиша"…
+# рядом с боевыми и не трогает их. В продакшене переменная не задана.
+_P = os.environ.get("SHEET_PREFIX", "")
+SHEET_USERS = f"{_P}Пользователи"
+SHEET_EVENTS = f"{_P}Афиша"
+SHEET_SIGNUPS = f"{_P}Записи"
+SHEET_MATERIALS = f"{_P}Материалы"
+SHEET_ACHIEVEMENTS = f"{_P}Достижения"
+SHEET_GENERAL = f"{_P}Общие"
+SHEET_POINTS = f"{_P}Листики"
+SHEET_REFERRALS = f"{_P}Рефералы"
+SHEET_PROMOCODES = f"{_P}Промокоды"
+# Журнал действий администраторов (создаётся сам при первом действии в админке).
+SHEET_ADMIN_LOG = f"{_P}Журнал"
+ADMIN_LOG_HEADERS = ["Время", "Админ", "Действие", "Объект", "Детали"]
 
 # Заголовки колонок (первая строка каждого листа).
 USERS_HEADERS = [
