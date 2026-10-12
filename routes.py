@@ -851,6 +851,10 @@ def materials():
         return jsonify({"error": "resident_only"}), 403
 
     items = sheets.list_materials()
+    # Новые материалы — первыми (и в Материалах, и в «Свежем в библиотеке» на
+    # Главной, которое берёт первые два). Сортировка устойчивая: у материалов с
+    # одной датой остаётся порядок строк таблицы.
+    items.sort(key=lambda m: m.get("Дата публикации") or "", reverse=True)
     result = [
         {
             "id": m["id"],
