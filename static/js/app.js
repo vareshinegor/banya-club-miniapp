@@ -31,14 +31,14 @@
     seg: "upcoming",
     materialsCategory: "Все",
     cache: { events: null, profile: null, materials: null, wallet: null },
-    onb: { phase: "intro", index: 0, steps: [], answers: {} },
+    onb: { phase: "intro", index: 0, steps: [], answers: {}, consent: false },
     faqOpen: 0,
     pay: { eventId: null, phase: "form", agree: false },
   };
 
   const ABOUT_VIDEOS = [
-    { id: "founder", src: "/static/media/founder.mp4?v=2", title: "Слово основателя", sub: "Филипп о том, зачем Ордену отбор и почему встречи проходят в бане." },
-    { id: "thursday", src: "/static/media/thursday.mp4", title: "Как проходит четверг в Ордене", sub: "Один вечер целиком: круг знакомств, запросы резидентов, свободный пар." },
+    { id: "founder", src: "/static/media/founders.mp4", title: "Слово основателей", sub: "Филипп и Анастасия о важности качества окружения и уровне встреч" },
+    { id: "thursday", src: "/static/media/thursday.mp4", title: "Как проходят встречи Банного Ордена", sub: "Резиденты о себе и сообществе" },
   ];
 
   const ABOUT_FAQ = [
@@ -252,7 +252,37 @@
 
   // --- Анкета: интро/визард/отправка/готово ----------------------------------
 
+  // Согласие на обработку персональных данных — без галочки анкету не начать.
+  // Текст согласия открывается отдельной страницей (/consent).
+  const CONSENT_CHECK_SVG = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="#213902" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  function renderConsent() {
+    const box = document.getElementById("onb-consent-check");
+    box.classList.toggle("checked", state.onb.consent);
+    box.setAttribute("aria-checked", state.onb.consent ? "true" : "false");
+    box.innerHTML = state.onb.consent ? CONSENT_CHECK_SVG : "";
+    document.getElementById("onb-start").disabled = !state.onb.consent;
+  }
+  function toggleConsent() {
+    state.onb.consent = !state.onb.consent;
+    renderConsent();
+  }
+  document.getElementById("onb-consent-row").addEventListener("click", (e) => {
+    if (e.target.closest("a")) return;
+    toggleConsent();
+  });
+  document.getElementById("onb-consent-check").addEventListener("keydown", (e) => {
+    if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggleConsent(); }
+  });
+  document.getElementById("onb-consent-link").addEventListener("click", (e) => {
+    e.preventDefault();
+    const url = new URL("/consent", window.location.origin).href;
+    if (tg && tg.openLink) tg.openLink(url);
+    else window.open(url, "_blank");
+  });
+  renderConsent();
+
   document.getElementById("onb-start").addEventListener("click", () => {
+    if (!state.onb.consent) return;
     state.onb.index = 0;
     showOnbPhase("form");
     renderOnbStep();
@@ -449,6 +479,7 @@
       offer: a.offer || "",
       income: a.income || "",
       source: a.source || "", source_other: a.source_other || "", referrer: a.referrer || "",
+      consent: !!state.onb.consent,
     };
   }
 

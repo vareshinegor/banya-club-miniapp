@@ -63,6 +63,14 @@ def create_app():
         response.headers["Cache-Control"] = "no-store, must-revalidate"
         return response
 
+    @app.route("/consent")
+    def consent():
+        # Текст согласия на обработку персональных данных — открывается по ссылке
+        # из галочки на первом экране анкеты. Публичная страница, без сессии.
+        response = make_response(render_template("consent.html"))
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        return response
+
     return app
 
 

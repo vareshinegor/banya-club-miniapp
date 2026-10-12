@@ -992,6 +992,11 @@ button, input, textarea {
   text-align: left;
 }
 
+.video-caption .t,
+.video-caption .s {
+  display: block;
+}
+
 .video-caption .t {
   font-size: 14.5px;
   font-weight: 500;
@@ -1559,6 +1564,45 @@ button, input, textarea {
 
 .btn-pill:active {
   background: var(--accent-active);
+}
+
+.btn-pill:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.btn-pill:disabled:active {
+  background: var(--accent);
+}
+
+/* Галочка согласия на обработку ПДн (экран «Подать заявку») */
+.onb-consent {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  margin-top: 28px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.onb-consent + .btn-pill {
+  margin-top: 16px;
+}
+
+.onb-consent .pay-check {
+  cursor: pointer;
+}
+
+.onb-consent-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-soft);
+}
+
+.onb-consent-text a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .onb-quote {

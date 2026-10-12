@@ -367,7 +367,14 @@ def register():
         return jsonify({"error": "missing_fields"}), 400
 
     sb_id = sheets.find_platform_id(telegram_id) or ""
-    sheets.create_user(telegram_id, session.get("username"), sb_id, field_values, _absolute_avatar_url(telegram_id))
+    # Галочку согласия на обработку ПДн ставят на первом экране анкеты; её
+    # отметку (время) сохраняем в "Согласие ПДн". Без флага (например, у
+    # человека открыта старая версия мини-аппа) заявку НЕ отбрасываем —
+    # теряется только отметка, по пустой ячейке видно, у кого её нет.
+    sheets.create_user(
+        telegram_id, session.get("username"), sb_id, field_values, _absolute_avatar_url(telegram_id),
+        consent=bool(data.get("consent")),
+    )
 
     try:
         # Схема ключей задана стороной vakas-tools — менять только по согласованию с ними.

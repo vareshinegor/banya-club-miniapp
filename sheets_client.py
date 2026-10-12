@@ -173,11 +173,12 @@ def find_user(telegram_id) -> Optional[dict]:
     return None
 
 
-def create_user(telegram_id, username, sb_id, fields: dict, avatar_url: str = ""):
+def create_user(telegram_id, username, sb_id, fields: dict, avatar_url: str = "", consent: bool = False):
     """fields: {header_name: value} for any subset of USERS_HEADERS. telegram_id,
     username, sb_id, Статус и Дата регистрации проставляются здесь автоматически.
     avatar_url — если фото уже загружено на шаге анкеты (он идёт раньше, чем
-    вызывается create_user)."""
+    вызывается create_user). consent — человек поставил галочку согласия на
+    обработку персональных данных: в "Согласие ПДн" пишем момент регистрации."""
     ws = get_worksheet(SHEET_USERS)
     row = []
     for header in USERS_HEADERS:
@@ -193,6 +194,8 @@ def create_user(telegram_id, username, sb_id, fields: dict, avatar_url: str = ""
             row.append(_now())
         elif header == "Аватарка":
             row.append(avatar_url or "")
+        elif header == "Согласие ПДн":
+            row.append(_now() if consent else "")
         else:
             row.append(fields.get(header, ""))
     ws.append_row(row, value_input_option="RAW")
