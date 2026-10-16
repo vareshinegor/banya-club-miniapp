@@ -1080,9 +1080,13 @@ button, input, textarea {
   color: var(--muted);
 }
 
+/* Высота по самой картинке, но не выше 190px: широкий баннер (≈2.7:1) показывается
+   целиком, а не обрезается по бокам вместе с надписями. min-height — для
+   заглушки «обложка недоступна». */
 .detail-cover {
   margin: 0 20px;
-  height: 190px;
+  min-height: 96px;
+  max-height: 190px;
   border-radius: 16px;
   overflow: hidden;
   background: var(--surface);
@@ -1096,7 +1100,8 @@ button, input, textarea {
 
 .detail-cover img {
   width: 100%;
-  height: 100%;
+  height: auto;
+  max-height: 190px;
   object-fit: cover;
   display: block;
 }
@@ -1883,14 +1888,12 @@ input::placeholder, textarea::placeholder {
   justify-content: center;
 }
 
-.onb-done-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  background: rgba(153, 164, 158, .18);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+/* Логотип над «Заявка отправлена» */
+.onb-done-logo {
+  display: block;
+  width: 125px;
+  height: auto;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, .5));
 }
 
 .onb-summary {
