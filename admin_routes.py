@@ -34,6 +34,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.exceptions import RequestEntityTooLarge
 
 import avatar_client
+import checkin_tokens
 import image_tools
 import sheets_client as sheets
 from config import Config
@@ -471,6 +472,18 @@ def user_detail(telegram_id):
                 "status": who.get("Статус", ""), "rewarded": (r.get("Награда") or "").strip(),
             })
 
+    visits = []
+    for c in sheets.list_checkins(telegram_id=telegram_id):
+        e = events.get(str(c.get("ID события")), {})
+        visits.append({
+            "event_id": str(c.get("ID события")),
+            "event": e.get("Название", f"(событие #{c.get('ID события')} удалено)"),
+            "event_date": e.get("Дата", ""),
+            "time": c.get("Время", ""),
+            "method": c.get("Способ", ""),
+        })
+    visits.sort(key=lambda v: v["time"], reverse=True)
+
     brief = _user_brief(user, balances, _paid_counts(all_signups))
     # списком, а не словарём: Flask сортирует ключи JSON по алфавиту, а поля
     # анкеты нужны в порядке самой анкеты (ФИО первым)
@@ -481,6 +494,7 @@ def user_detail(telegram_id):
         "sb_id": user.get("sb_id", ""),
         "ledger": sheets.list_points_ledger(telegram_id, 100),
         "signups": signups,
+        "visits": visits,
         "invited_by": invited_by,
         "invited": invited,
         "achievements": [
@@ -712,13 +726,18 @@ def event_delete(event_id):
 
 def _event_signup_rows(event_id: str) -> list:
     users = {str(u.get("telegram_id")): u for u in sheets.list_users()}
+    checks = {c["telegram_id"]: c for c in sheets.list_checkins(event_id=event_id)}
     rows = []
+    seen = set()
     for s in sheets.list_signups_all():
         if str(s.get("ID события")) != str(event_id):
             continue
-        u = users.get(str(s.get("telegram_id")), {})
+        tid = str(s.get("telegram_id"))
+        seen.add(tid)
+        u = users.get(tid, {})
+        check = checks.get(tid, {})
         rows.append({
-            "telegram_id": str(s.get("telegram_id")),
+            "telegram_id": tid,
             "fio": u.get("ФИО", "— (анкета удалена)"),
             "username": u.get("username", ""),
             "phone": u.get("Телефон", ""),
@@ -730,8 +749,21 @@ def _event_signup_rows(event_id: str) -> list:
             "promo": s.get("Промокод", ""),
             "created": s.get("Дата записи", ""),
             "order": s.get("Заказ", ""),
+            "checked_in": check.get("Время", ""),
+            "checkin_method": check.get("Способ", ""),
         })
     rows.sort(key=lambda r: r["created"])
+    # отмеченные на входе без записи на это событие (пришли «с улицы» / записал админ вручную)
+    for tid, check in checks.items():
+        if tid in seen:
+            continue
+        u = users.get(tid, {})
+        rows.append({
+            "telegram_id": tid, "fio": u.get("ФИО", "— (анкета удалена)"), "username": u.get("username", ""),
+            "phone": u.get("Телефон", ""), "tier": _membership_tier(u) if u else "pending",
+            "status": "без записи", "quantity": 1, "cash": 0, "points": 0, "promo": "", "created": "", "order": "",
+            "checked_in": check.get("Время", ""), "checkin_method": check.get("Способ", ""),
+        })
     return rows
 
 
@@ -781,8 +813,8 @@ def event_signup_cancel(event_id, telegram_id):
 @admin_required
 def export_event(event_id):
     rows = _event_signup_rows(event_id)
-    header = ["ФИО", "telegram_id", "username", "Телефон", "Статус записи", "Билетов", "Оплачено деньгами, ₽", "Дубиков", "Промокод", "Дата записи"]
-    data = [[r["fio"], r["telegram_id"], r["username"], r["phone"], r["status"], r["quantity"], r["cash"], r["points"], r["promo"], r["created"]] for r in rows]
+    header = ["ФИО", "telegram_id", "username", "Телефон", "Статус записи", "Билетов", "Оплачено деньгами, ₽", "Дубиков", "Промокод", "Дата записи", "Пришёл (время отметки)"]
+    data = [[r["fio"], r["telegram_id"], r["username"], r["phone"], r["status"], r["quantity"], r["cash"], r["points"], r["promo"], r["created"], r["checked_in"]] for r in rows]
     _log("Экспорт", f"записи события #{event_id}", f"{len(data)} строк")
     return _csv_response(f"banya-event-{event_id}.csv", header, data)
 
@@ -1007,3 +1039,74 @@ def points_all():
 @admin_required
 def log_list():
     return jsonify({"items": sheets.list_admin_log(300)})
+
+
+# --- Чекер: отметка прихода на мероприятие ----------------------------------
+
+
+def _checkin_card(user: dict) -> dict:
+    tid = str(user.get("telegram_id", ""))
+    return {
+        "telegram_id": tid,
+        "fio": user.get("ФИО", ""),
+        "company": user.get("Компания/Проект", ""),
+        "position": user.get("Должность", ""),
+        "username": user.get("username", ""),
+        "tier": _membership_tier(user),
+        "status": user.get("Статус", ""),
+        "avatar": _avatar_url(tid),
+    }
+
+
+@admin.route("/api/checkin", methods=["POST"])
+@admin_required
+def checkin():
+    """Отмечает приход человека на событие. Человек задаётся кодом из его QR
+    (code) или вручную (telegram_id). Ответ status:
+      ok         — отметили;
+      already    — уже был отмечен раньше (time — когда);
+      no_signup  — на это событие у человека нет оплаченной записи: не отмечаем,
+                   пока админ не подтвердит (повтор с force=true)."""
+    data = request.get_json(silent=True) or {}
+    event_id = _str(data, "event_id", 20)
+    event = next((e for e in sheets.admin_list_events() if str(e["id"]) == event_id), None)
+    if not event:
+        return _err("not_found", "Событие не найдено", 404)
+
+    code = _str(data, "code", 100)
+    if code:
+        telegram_id = checkin_tokens.parse_code(code)
+        if not telegram_id:
+            return _err("bad_code", "Это не QR-код Банного Ордена (или код повреждён)")
+        method = "QR"
+    else:
+        telegram_id = _str(data, "telegram_id", 30)
+        method = "вручную"
+    user = _find_user_or_404(telegram_id)
+    if not user:
+        return _err("no_user", "Человека с этим кодом нет в базе", 404)
+    card = _checkin_card(user)
+
+    existing = sheets.get_checkin(telegram_id, event_id)
+    if existing:
+        return jsonify({"status": "already", "user": card, "time": existing.get("Время", "")})
+
+    quantity = sheets.get_signup_quantity(telegram_id, event_id)
+    walk_in = quantity == 0
+    if walk_in and not data.get("force"):
+        return jsonify({"status": "no_signup", "user": card})
+
+    when = sheets.add_checkin(telegram_id, event_id, g.admin, method + (", без записи" if walk_in else ""))
+    _log("Отметка прихода", f"{event.get('Название', '')} (#{event_id})", f"{user.get('ФИО', '')} ({telegram_id}) · {method}{' · без записи' if walk_in else ''}")
+    return jsonify({"status": "ok", "user": card, "quantity": max(quantity, 1), "walk_in": walk_in, "time": when})
+
+
+@admin.route("/api/checkin/<event_id>/<telegram_id>", methods=["DELETE"])
+@admin_required
+def checkin_undo(event_id, telegram_id):
+    record = sheets.remove_checkin(telegram_id, event_id)
+    if not record:
+        return _err("not_found", "Отметки нет", 404)
+    user = _find_user_or_404(telegram_id) or {}
+    _log("Отметка снята", f"событие #{event_id}", f"{user.get('ФИО', telegram_id)} ({telegram_id}); было {record.get('Время', '')}")
+    return jsonify({"status": "ok"})

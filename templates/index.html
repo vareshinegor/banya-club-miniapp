@@ -114,6 +114,15 @@
       </button>
     </nav>
 
+    <div id="qr-overlay" class="qr-overlay" hidden>
+      <div class="qr-sheet" role="dialog" aria-modal="true" aria-label="QR-код для входа">
+        <button type="button" class="qr-close" data-action="qr-close" aria-label="Закрыть">&times;</button>
+        <div class="qr-big"><img id="qr-big-img" alt="QR-код для входа"></div>
+        <div class="qr-name" id="qr-name"></div>
+        <div class="qr-hint">Покажите администратору на входе</div>
+      </div>
+    </div>
+
     <div id="pay-overlay" class="pay-overlay" hidden>
       <div class="pay-backdrop" data-action="pay-close"></div>
       <div class="pay-sheet">

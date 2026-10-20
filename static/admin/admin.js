@@ -13,6 +13,7 @@
     usersQuery: "",
     usersSort: { key: "registered", dir: -1 },
     eventsSeg: "upcoming",
+    checkinEvent: null,
   };
 
   const view = document.getElementById("view");
@@ -55,6 +56,7 @@
     book: ["M4 19.5A2.5 2.5 0 0 1 6.5 17H20", "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"],
     coin: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v12", "M9 9.5h4.5a1.8 1.8 0 0 1 0 3.5H9.5a1.8 1.8 0 0 0 0 3.5H15"],
     log: ["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"],
+    qr: ["M3 3h7v7H3z", "M14 3h7v7h-7z", "M3 14h7v7H3z", "M14 14h3v3h-3z", "M20 14v3", "M14 20h7", "M20 20h1"],
   };
 
   function icon(name) {
@@ -556,6 +558,13 @@
             h("div", { class: "modal-actions", style: "justify-content:flex-start;margin:6px 0 12px" }, pointsBtn),
             ledger,
           ),
+          h("div", { class: "card" }, h("h2", {}, "Посещения", h("span", { class: "count", text: d.visits.length || "" })),
+            d.visits.length
+              ? d.visits.map((v) => h("div", { class: "list-row" },
+                  h("div", { class: "main" }, h("a", { href: `#/events/${v.event_id}/signups`, text: v.event }), h("div", { class: "sub", text: `${dateLabel(v.event_date)} · отмечен ${v.time}${v.method ? " · " + v.method : ""}` }))))
+              : h("div", { class: "muted", text: "Отметок на входе пока нет" }),
+            h("div", { class: "hint", style: "margin-top:10px", text: "События до запуска чекера (21.10.2026) считаются посещёнными по записи — здесь их нет." }),
+          ),
           h("div", { class: "card" }, h("h2", {}, "Рефералы"), refs),
           h("div", { class: "card" }, h("h2", {}, "Знаки Ордена"),
             achievements.length ? achievements : h("div", { class: "muted", style: "margin-bottom:12px", text: "Знаков пока нет" }),
@@ -767,8 +776,9 @@
             : "—"),
         },
         { label: "Когда", cls: "nowrap", render: (r) => r.created || "—" },
+        { label: "Пришёл", cls: "nowrap", render: (r) => (r.checked_in ? h("span", { class: "plus", title: r.checked_in, text: `✓ ${r.checked_in.slice(11)}` }) : h("span", { class: "muted", text: "—" })) },
         {
-          label: "", render: (r) => (r.status === "отклонено" ? "" : h("button", {
+          label: "", render: (r) => (r.status === "отклонено" || r.status === "без записи" ? "" : h("button", {
             class: "btn btn-sm btn-danger", type: "button", text: "Отменить",
             onclick: async (e) => {
               const btn = e.currentTarget;
@@ -789,10 +799,11 @@
       pageHead(ev.title, `${dateLabel(ev.date)}${ev.time ? " · " + ev.time : ""}${ev.place ? " · " + ev.place : ""}`, [
         h("a", { class: "btn", href: `/admin/api/events/${encodeURIComponent(ev.id)}/export.csv`, text: "Экспорт CSV" }),
         h("button", { class: "btn", type: "button", text: "Изменить событие", onclick: () => openEventForm(ev) }),
+        h("button", { class: "btn", type: "button", text: "Чекин (QR)", onclick: () => { state.checkinEvent = ev.id; location.hash = "#/checkin"; } }),
         h("button", { class: "btn btn-primary", type: "button", text: "+ Записать человека", onclick: () => openAddSignup(ev) }),
       ]),
       h("div", { class: "grid grid-4", style: "margin-bottom:18px" },
-        h("div", { class: "stat" }, h("div", { class: "label", text: "Записано людей" }), h("div", { class: "value", text: people })),
+        h("div", { class: "stat" }, h("div", { class: "label", text: "Записано людей" }), h("div", { class: "value", text: `${people}${rows.some((r) => r.checked_in) ? ` · пришло ${rows.filter((r) => r.checked_in).length}` : ""}` })),
         h("div", { class: "stat" }, h("div", { class: "label", text: "Билетов" }), h("div", { class: "value", text: tickets })),
         h("div", { class: "stat" }, h("div", { class: "label", text: "Оплачено деньгами" }), h("div", { class: "value", text: money(cash) })),
         h("div", { class: "stat" }, h("div", { class: "label", text: "Оплачено дубиками" }), h("div", { class: "value", text: num(points) })),
@@ -844,6 +855,260 @@
       field("Билетов", qty),
       h("div", { class: "modal-actions" }, h("button", { class: "btn btn-ghost", type: "button", text: "Отмена", onclick: () => modal.close() }), addBtn),
     ));
+  }
+
+  // ------------------------------------------------------------------ чекин
+
+  // Отметка прихода: сканируем QR из профиля человека (камера или фото),
+  // либо отмечаем вручную из списка. Сканер остановится при уходе со страницы.
+  let scanner = null;
+
+  function stopScanner() {
+    if (scanner) { scanner.stop(); scanner = null; }
+  }
+
+  function loadJsQR() {
+    if (window.jsQR) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const el = document.createElement("script");
+      el.src = "/static/admin/jsQR.js";
+      el.onload = () => resolve();
+      el.onerror = () => reject(new Error("Не удалось загрузить сканер QR"));
+      document.head.append(el);
+    });
+  }
+
+  function beep(ok) {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      beep.ac = beep.ac || new Ctx();
+      const osc = beep.ac.createOscillator();
+      const gain = beep.ac.createGain();
+      osc.frequency.value = ok ? 880 : 220;
+      gain.gain.value = 0.08;
+      osc.connect(gain);
+      gain.connect(beep.ac.destination);
+      osc.start();
+      osc.stop(beep.ac.currentTime + (ok ? 0.12 : 0.3));
+    } catch (e) { /* звук необязателен */ }
+    if (navigator.vibrate) navigator.vibrate(ok ? 60 : [80, 60, 80]);
+  }
+
+  const localISO = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+  async function pageCheckin(ctx) {
+    const { events } = await api("/events");
+    if (!events.length) {
+      ctx.view(pageHead("Чекин", "Отметка прихода по QR-коду"), h("div", { class: "card" }, h("div", { class: "empty", text: "Сначала добавьте событие в Афише" })));
+      return;
+    }
+    const today = localISO();
+    const byDate = [...events].sort((a, b) => (a.date > b.date ? 1 : -1));
+    const pick = () =>
+      (byDate.find((e) => e.date === today) || byDate.find((e) => e.date > today) || byDate[byDate.length - 1]).id;
+    if (!events.some((e) => String(e.id) === String(state.checkinEvent))) state.checkinEvent = pick();
+    if (!state.users.length) state.users = (await api("/users")).users;
+
+    const eventLabel = (e) => `${dateLabel(e.date).replace(/ \d{4},/, ",")} — ${e.title}`;
+    const select = h("select", { class: "input input-select", onchange: (e) => { state.checkinEvent = e.target.value; loadAttendance(); } },
+      [...events].sort((a, b) => (a.date < b.date ? 1 : -1)).map((e) => h("option", { value: String(e.id), text: eventLabel(e) })));
+    select.value = String(state.checkinEvent);
+
+    const counters = h("div", { class: "page-actions" });
+    const attendance = h("div", {});
+    const result = h("div", { class: "scan-result", style: "margin-top:14px" }, h("span", { class: "muted", text: "Здесь появится результат сканирования" }));
+
+    // ---- результат отметки
+    const showResult = (kind, card, lines, actions) => {
+      result.className = `scan-result ${kind}`;
+      result.replaceChildren(...[
+        card ? avatar({ avatar: card.avatar, fio: card.fio }, true) : null,
+        h("div", { style: "min-width:0;flex:1" },
+          card ? h("div", { class: "big", text: card.fio || "(без имени)" }) : null,
+          ...lines.map((t) => h("div", { class: "meta", text: t })),
+          actions ? h("div", { class: "page-actions", style: "margin-top:10px" }, actions) : null),
+      ].filter(Boolean)); // replaceChildren превращает null в текст «null»
+    };
+
+    async function submit(payload) {
+      let res;
+      try {
+        res = await api("/checkin", { method: "POST", json: { event_id: state.checkinEvent, ...payload } });
+      } catch (err) {
+        beep(false);
+        showResult("err", null, [err.message]);
+        return;
+      }
+      const card = res.user;
+      const sub = [TIER[card.tier], card.company].filter(Boolean).join(" · ");
+      if (res.status === "ok") {
+        beep(true);
+        showResult("ok", card, [`✓ Отмечен(а) в ${res.time.slice(11)}`, sub, res.walk_in ? "Без записи на это событие" : `Билетов: ${res.quantity}`]);
+        loadAttendance();
+      } else if (res.status === "already") {
+        beep(false);
+        showResult("warn", card, [`Уже отмечен(а) в ${res.time.slice(11)}`, sub]);
+      } else if (res.status === "no_signup") {
+        beep(false);
+        showResult("warn", card, ["Нет оплаченной записи на это событие", sub], [
+          h("button", { class: "btn btn-sm btn-primary", type: "button", text: "Всё равно отметить", onclick: () => submit({ ...payload, force: true }) }),
+          h("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Отмена", onclick: () => showResult("", null, ["Отменено"]) }),
+        ]);
+      }
+    }
+
+    let lastCode = "";
+    let lastAt = 0;
+    const onCode = (text) => {
+      const now = Date.now();
+      if (text === lastCode && now - lastAt < 4000) return; // одну и ту же карточку камера видит много кадров подряд
+      lastCode = text;
+      lastAt = now;
+      submit({ code: text });
+    };
+
+    // ---- камера и фото
+    const video = h("video", { class: "scan-video", playsinline: "", muted: "", hidden: true });
+    const idle = h("div", { class: "scan-idle", text: "Камера выключена. Нажмите «Включить камеру» и наведите её на QR-код в профиле гостя." });
+    const canvas = document.createElement("canvas");
+    const camBtn = h("button", { class: "btn btn-primary", type: "button", text: "Включить камеру" });
+    const photoInput = h("input", { type: "file", accept: "image/*", capture: "environment", hidden: true });
+
+    const setCameraUi = (on) => {
+      video.hidden = !on;
+      idle.hidden = on;
+      camBtn.textContent = on ? "Выключить камеру" : "Включить камеру";
+      camBtn.className = `btn ${on ? "" : "btn-primary"}`;
+    };
+
+    camBtn.addEventListener("click", async () => {
+      if (scanner) { stopScanner(); setCameraUi(false); return; }
+      camBtn.disabled = true;
+      try {
+        await loadJsQR();
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+        video.srcObject = stream;
+        await video.play();
+        let alive = true;
+        const g = canvas.getContext("2d", { willReadFrequently: true });
+        const tick = () => {
+          if (!alive) return;
+          if (video.readyState >= 2 && video.videoWidth) {
+            const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+            canvas.width = Math.round(video.videoWidth * scale);
+            canvas.height = Math.round(video.videoHeight * scale);
+            g.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const img = g.getImageData(0, 0, canvas.width, canvas.height);
+            const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
+            if (code && code.data) onCode(code.data);
+          }
+          setTimeout(tick, 140);
+        };
+        scanner = { stop: () => { alive = false; stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; } };
+        setCameraUi(true);
+        tick();
+      } catch (err) {
+        const reasons = {
+          NotAllowedError: "Доступ к камере запрещён — разрешите его в браузере или используйте «Фото QR»",
+          NotFoundError: "Камера не найдена — используйте «Фото QR» или отметьте вручную",
+          NotReadableError: "Камеру занимает другое приложение — закройте его и повторите",
+          OverconstrainedError: "Не удалось включить камеру с такими параметрами",
+        };
+        const insecure = window.isSecureContext === false ? "Камера работает только по https — откройте панель по защищённой ссылке" : "";
+        toast(insecure || (err && reasons[err.name]) || (err && err.message) || "Камера недоступна", "error");
+      } finally {
+        camBtn.disabled = false;
+      }
+    });
+
+    photoInput.addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      e.target.value = "";
+      if (!file) return;
+      try {
+        await loadJsQR();
+        const bmp = await createImageBitmap(file);
+        const scale = Math.min(1, 1400 / Math.max(bmp.width, bmp.height));
+        canvas.width = Math.round(bmp.width * scale);
+        canvas.height = Math.round(bmp.height * scale);
+        const g = canvas.getContext("2d", { willReadFrequently: true });
+        g.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+        const img = g.getImageData(0, 0, canvas.width, canvas.height);
+        const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: "attemptBoth" });
+        if (!code || !code.data) { beep(false); showResult("err", null, ["QR на фото не найден. Снимите ближе и ровнее."]); return; }
+        lastCode = "";
+        onCode(code.data);
+      } catch (err) {
+        showResult("err", null, [err.message || "Не удалось прочитать фото"]);
+      }
+    });
+
+    // ---- ручная отметка
+    const search = h("input", { class: "input", type: "search", placeholder: "Найти человека: имя, телефон, @username…" });
+    const found = h("div", { style: "margin-top:8px" });
+    search.addEventListener("input", () => {
+      const q = search.value.trim().toLowerCase();
+      if (!q) { found.replaceChildren(); return; }
+      const list = state.users.filter((u) => [u.fio, u.phone, u.username, u.company].some((v) => (v || "").toLowerCase().includes(q))).slice(0, 6);
+      found.replaceChildren(...(list.length ? list.map((u) => h(
+        "div", { class: "list-row" },
+        personCell(u),
+        h("button", { class: "btn btn-sm btn-primary", type: "button", text: "Отметить", onclick: () => { submit({ telegram_id: u.telegram_id }); search.value = ""; found.replaceChildren(); } }),
+      )) : [h("div", { class: "muted", text: "Никого не нашлось" })]));
+    });
+
+    // ---- таблица пришедших/записавшихся
+    async function loadAttendance() {
+      const { signups } = await api(`/events/${encodeURIComponent(state.checkinEvent)}/signups`);
+      const live = signups.filter((r) => r.status !== "отклонено");
+      const paid = live.filter((r) => r.status === "оплачено");
+      const checked = live.filter((r) => r.checked_in);
+      const tickets = checked.reduce((sum, r) => sum + r.quantity, 0);
+      counters.replaceChildren(
+        h("span", { class: "badge badge-paid", text: `Пришло: ${checked.length}${tickets !== checked.length ? ` (билетов ${tickets})` : ""}` }),
+        h("span", { class: "badge badge-past", text: `Записано: ${paid.length}` }),
+        h("span", { class: "badge badge-wait", text: `Не пришли: ${paid.filter((r) => !r.checked_in).length}` }),
+      );
+      attendance.replaceChildren(table(
+        [
+          { label: "Человек", render: (r) => h("div", {}, h("a", { href: `#/users/${r.telegram_id}`, text: r.fio }), h("span", { class: "sub", text: [r.username ? "@" + r.username : "", TIER[r.tier]].filter(Boolean).join(" · ") })) },
+          { label: "Запись", render: (r) => signupBadge(r.status) },
+          { label: "Билетов", cls: "num", render: (r) => r.quantity },
+          { label: "Пришёл", cls: "nowrap", render: (r) => (r.checked_in ? h("span", { class: "plus", text: `✓ ${r.checked_in.slice(11)}${r.checkin_method ? " · " + r.checkin_method : ""}` }) : h("span", { class: "muted", text: "—" })) },
+          {
+            label: "",
+            render: (r) => (r.checked_in
+              ? h("button", { class: "btn btn-sm btn-ghost", type: "button", text: "Снять отметку", onclick: async (e) => {
+                  const ok = await run(e.currentTarget, () => api(`/checkin/${encodeURIComponent(state.checkinEvent)}/${r.telegram_id}`, { method: "DELETE" }), "Отметка снята");
+                  if (ok) loadAttendance();
+                } })
+              : r.status === "отклонено" ? "" : h("button", { class: "btn btn-sm btn-primary", type: "button", text: "Отметить", onclick: () => submit({ telegram_id: r.telegram_id }) })),
+          },
+        ],
+        live,
+        { empty: "На это событие пока никто не записан" },
+      ));
+    }
+
+    ctx.view(
+      pageHead("Чекин", "Отметка прихода на мероприятие по QR-коду из профиля гостя"),
+      h("div", { class: "card" },
+        field("Событие", select),
+        counters,
+      ),
+      h("div", { class: "card" },
+        h("h2", {}, "Сканер"),
+        h("div", { class: "scan-wrap" },
+          h("div", {}, video, idle,
+            h("div", { class: "upload-row", style: "margin-top:12px" }, camBtn, h("button", { class: "btn", type: "button", text: "Фото QR", onclick: () => photoInput.click() }), photoInput)),
+          h("div", {}, result,
+            h("p", { class: "hint", style: "margin:12px 0 0", text: "Результат показывается сразу: зелёный — отмечен, жёлтый — уже был отмечен или нет записи, красный — код не распознан. Если камера недоступна, нажмите «Фото QR» или отметьте вручную ниже." })),
+        ),
+      ),
+      h("div", { class: "card" }, h("h2", {}, "Отметить вручную"), search, found),
+      h("div", { class: "card" }, h("h2", {}, "Кто пришёл"), attendance),
+    );
+    await loadAttendance();
   }
 
   // -------------------------------------------------------------------- promo
@@ -1053,6 +1318,7 @@
     { key: "dashboard", href: "#/dashboard", label: "Обзор", icon: "dashboard" },
     { key: "users", href: "#/users", label: "Люди", icon: "users", badge: true },
     { key: "events", href: "#/events", label: "Афиша", icon: "calendar" },
+    { key: "checkin", href: "#/checkin", label: "Чекин", icon: "qr" },
     { key: "promo", href: "#/promo", label: "Промокоды", icon: "tag" },
     { key: "materials", href: "#/materials", label: "Материалы", icon: "book" },
     { key: "points", href: "#/points", label: "Дубики", icon: "coin" },
@@ -1065,6 +1331,7 @@
     { re: /^#\/users\/([^/?]+)$/, nav: "users", render: (ctx, m) => pageUser(ctx, decodeURIComponent(m[1])) },
     { re: /^#\/events$/, nav: "events", render: (ctx) => pageEvents(ctx) },
     { re: /^#\/events\/([^/]+)\/signups$/, nav: "events", render: (ctx, m) => pageEventSignups(ctx, decodeURIComponent(m[1])) },
+    { re: /^#\/checkin$/, nav: "checkin", render: (ctx) => pageCheckin(ctx) },
     { re: /^#\/promo$/, nav: "promo", render: (ctx) => pagePromo(ctx) },
     { re: /^#\/materials$/, nav: "materials", render: (ctx) => pageMaterials(ctx) },
     { re: /^#\/points$/, nav: "points", render: (ctx) => pagePoints(ctx) },
@@ -1087,6 +1354,7 @@
   async function route() {
     const hash = location.hash || "#/dashboard";
     const seq = ++renderSeq;
+    stopScanner();
     let matched = null;
     for (const r of ROUTES) {
       const m = r.re.exec(hash);

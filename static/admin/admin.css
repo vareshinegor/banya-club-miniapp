@@ -322,3 +322,62 @@ td .sub { display: block; color: var(--muted); font-size: 12.5px; }
   .grid-2, .grid-3, .field-row, .field-row-3, .cover-box { grid-template-columns: minmax(0, 1fr); }
   .kv { grid-template-columns: 1fr; }
 }
+
+/* ---------- чекин: сканер и результат ---------- */
+
+.scan-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.scan-video,
+.scan-idle {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 12px;
+  background: #050807;
+}
+
+.scan-video {
+  display: block;
+  object-fit: cover;
+}
+
+/* display выше перебивает атрибут hidden — возвращаем скрытие явно */
+.scan-video[hidden],
+.scan-idle[hidden] {
+  display: none;
+}
+
+.scan-idle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  border: 1px dashed var(--border-gold);
+  text-align: center;
+  color: var(--muted);
+}
+
+.scan-result {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 96px;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.scan-result.ok { background: var(--success-bg); border-color: rgba(140, 177, 105, .55); }
+.scan-result.warn { background: var(--warning-bg); border-color: rgba(216, 154, 71, .55); }
+.scan-result.err { background: var(--danger-bg); border-color: rgba(226, 131, 113, .55); color: var(--danger); }
+.scan-result .big { font: 600 24px/1.15 var(--serif); }
+.scan-result .meta { margin-top: 2px; color: var(--text-soft); font-size: 13.5px; }
+
+@media (max-width: 860px) {
+  .scan-wrap { grid-template-columns: minmax(0, 1fr); }
+}

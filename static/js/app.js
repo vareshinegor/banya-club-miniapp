@@ -183,7 +183,8 @@
   // --- Состояния кнопки записи ---------------------------------------------
 
   function eventActionState(e) {
-    if (e._past) return e.is_registered ? "attended" : "none";
+    if (e.attended) return "attended"; // отмечен на входе (или событие до запуска чекера)
+    if (e._past) return "none";
     if (e.is_registered) return "joined";
     if (!e.can_signup) return "locked";
     // Цену ещё не вписали (и это не "Бесплатно") — записаться пока нельзя
@@ -603,6 +604,9 @@
     if (linkBtn) { e.preventDefault(); openExternalLink(linkBtn.dataset.materialLink); return; }
     const attendeeBtn = e.target.closest("[data-open-attendee]");
     if (attendeeBtn) { openAttendee(attendeeBtn.dataset.openAttendee); return; }
+    const calBtn = e.target.closest("[data-cal-url]");
+    if (calBtn) { openExternalLink(calBtn.dataset.calUrl); return; }
+    if (e.target.closest('[data-action="qr-open"]')) { openQr(); return; }
     const refShare = e.target.closest('[data-action="ref-share"]');
     if (refShare) { if (state.cache.wallet) shareReferral(state.cache.wallet.referral_link); return; }
     const refCopy = e.target.closest('[data-action="ref-copy"]');
@@ -849,6 +853,64 @@
     }
   }
 
+  // --- Календарь и QR для входа ------------------------------------------------
+
+  // Google и Outlook открываются в браузере, файл .ics подходит для Apple
+  // Календаря, Яндекс.Календаря и любых других программ.
+  function calendarBlockHtml(c) {
+    const btn = (label, url) => (url ? `<button type="button" class="cal-btn" data-cal-url="${escapeHtml(url)}">${label}</button>` : "");
+    return `<div class="cal-block">
+      <div class="cal-title">Добавить в календарь</div>
+      <div class="cal-buttons">${btn("Google", c.google)}${btn("Outlook", c.outlook)}${btn("Файл .ics", c.ics)}</div>
+      <div class="cal-hint">Файл .ics открывается в Apple Календаре, Яндекс.Календаре и других программах.</div>
+    </div>`;
+  }
+
+  function qrTicketHtml() {
+    return `<button type="button" class="qr-ticket" data-action="qr-open">
+      <span class="qr-ticket-title">Показать QR-код для входа</span>
+      <span class="qr-ticket-sub">Администратор отсканирует его на входе</span>
+    </button>`;
+  }
+
+  function qrCardHtml() {
+    return `<div class="qr-card">
+      <button type="button" class="qr-thumb" data-action="qr-open" aria-label="Показать QR-код крупно"><img src="/api/profile/qr.svg" alt="QR-код профиля"></button>
+      <div class="qr-text">
+        <div class="qr-title">Ваш QR-код</div>
+        <div class="qr-note">Покажите его на входе — администратор отсканирует и отметит ваш приход. Посещение появится в этом профиле.</div>
+        <button type="button" class="btn-secondary qr-btn" data-action="qr-open">Показать крупно</button>
+      </div>
+    </div>`;
+  }
+
+  function openQr() {
+    document.getElementById("qr-big-img").src = `/api/profile/qr.svg?ts=${Date.now()}`;
+    document.getElementById("qr-name").textContent = (state.user && state.user.fio) || "";
+    document.getElementById("qr-overlay").hidden = false;
+  }
+
+  function closeQr() {
+    document.getElementById("qr-overlay").hidden = true;
+  }
+  document.getElementById("qr-overlay").addEventListener("click", (e) => {
+    if (e.target.id === "qr-overlay" || e.target.closest('[data-action="qr-close"]')) closeQr();
+  });
+
+  // Вернулись в мини-апп (например, после отметки на входе) — не показываем
+  // устаревшие «Посещу/Посетил»: сбрасываем кэш и перерисовываем профиль.
+  let lastVisibleRefresh = 0;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    const now = Date.now();
+    if (now - lastVisibleRefresh < 5000) return; // частые переключения не должны сыпать запросами (квота Google Таблиц)
+    lastVisibleRefresh = now;
+    state.cache.events = null;
+    state.cache.profile = null;
+    state.cache.wallet = null;
+    if (state.tab === "profile" && state.route === "list" && !screens.main.hidden) renderProfile();
+  });
+
   // --- Карточка мероприятия -----------------------------------------------
 
   async function renderEventDetail() {
@@ -872,6 +934,8 @@
         <div class="detail-fact"><span>Взнос</span><span>${escapeHtml(e.price || "—")}</span></div>
       </div>`;
       if (e.description) html += `<p class="detail-desc">${escapeHtml(e.description)}</p>`;
+      if (!e._past && data.calendar) html += calendarBlockHtml(data.calendar);
+      if (e.is_registered && !e._past && !e.attended) html += qrTicketHtml();
 
       html += `<div class="participants-title"><span>Участники</span><span>${data.attendees_count} резидент${pluralSuffix(data.attendees_count)}</span></div>`;
       html += shown.length
@@ -1086,7 +1150,7 @@
     content.innerHTML = pageHeaderHtml("Профиль") + `<div class="scroll-pad">${skeletonHtml(3)}</div>`;
     try {
       // кошелёк подгружаем рядом с профилем; если он не загрузился — просто без блока
-      const [data, wallet] = await Promise.all([getProfile(), getWallet(true).catch(() => null)]);
+      const [data, wallet] = await Promise.all([getProfile(true), getWallet(true).catch(() => null)]);
       const u = data.user;
       state.user = { ...state.user, ...u };
 
@@ -1106,6 +1170,7 @@
         </div>
       </div>`;
 
+      html += qrCardHtml();
       if (wallet) html += walletBlockHtml(wallet);
 
       const fields = [

@@ -2168,3 +2168,198 @@ input::placeholder, textarea::placeholder {
 
 .wallet-hist-row .plus { color: var(--success); font-weight: 600; }
 .wallet-hist-row .minus { color: var(--text-soft); font-weight: 600; }
+
+/* ---------- Добавить в календарь ---------- */
+
+.cal-block {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-gold);
+}
+
+.cal-title {
+  margin-bottom: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cal-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.cal-btn {
+  min-height: 42px;
+  border-radius: 12px;
+  border: 1px solid var(--border-gold);
+  background: transparent;
+  color: var(--text);
+  font: 500 14px var(--sans);
+  cursor: pointer;
+}
+
+.cal-btn:active {
+  background: rgba(237, 235, 230, .08);
+}
+
+.cal-hint {
+  margin-top: 9px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+/* ---------- QR-код для входа ---------- */
+
+.qr-ticket {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--accent);
+  background: rgba(201, 151, 78, .12);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.qr-ticket-title {
+  font: 600 15px var(--sans);
+  color: var(--accent);
+}
+
+.qr-ticket-sub {
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+
+.qr-card {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin: 16px 0;
+  padding: 14px;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-gold);
+}
+
+.qr-thumb {
+  flex: none;
+  width: 108px;
+  height: 108px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.qr-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.qr-text {
+  min-width: 0;
+}
+
+.qr-title {
+  font: 600 15px var(--sans);
+}
+
+.qr-note {
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-soft);
+}
+
+.qr-btn {
+  width: auto;
+  min-height: 36px;
+  margin-top: 10px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+}
+
+.qr-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(6, 10, 8, .92);
+}
+
+.qr-overlay[hidden] {
+  display: none;
+}
+
+.qr-sheet {
+  position: relative;
+  width: 100%;
+  max-width: 360px;
+  padding: 26px 22px 22px;
+  border-radius: 22px;
+  background: #1d2823;
+  border: 1px solid var(--border-gold);
+  text-align: center;
+}
+
+.qr-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.qr-big {
+  width: min(72vw, 290px);
+  aspect-ratio: 1;
+  margin: 0 auto;
+  border-radius: 16px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.qr-big img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.qr-name {
+  margin-top: 16px;
+  font: 600 22px/1.15 var(--serif);
+}
+
+.qr-hint {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}

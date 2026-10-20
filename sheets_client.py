@@ -2,7 +2,7 @@ import json
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import gspread
@@ -12,6 +12,8 @@ from gspread.utils import rowcol_to_a1
 from config import Config
 from constants import (
     ADMIN_LOG_HEADERS,
+    CHECKIN_HEADERS,
+    CHECKIN_TZ_OFFSET_HOURS,
     EVENTS_HEADERS,
     POINTS_REASON_ORDER,
     POINTS_REASON_REFERRAL,
@@ -20,6 +22,7 @@ from constants import (
     REFERRAL_REWARD_POINTS,
     SHEET_ACHIEVEMENTS,
     SHEET_ADMIN_LOG,
+    SHEET_CHECKINS,
     SHEET_EVENTS,
     SHEET_GENERAL,
     SHEET_MATERIALS,
@@ -1075,3 +1078,62 @@ def list_admin_log(limit: int = 300) -> list:
     ]
     items.reverse()
     return items[:limit]
+
+
+# --- Посещения (чекер) ----------------------------------------------------
+# Одна строка листа «Посещения» = один человек отмечен на входе одного события.
+# Лист создаётся сам при первом обращении (ensure_worksheet).
+
+
+def _checkin_time() -> str:
+    """Время отметки по Москве, какой бы часовой пояс ни был у сервера."""
+    moment = datetime.now(timezone.utc) + timedelta(hours=CHECKIN_TZ_OFFSET_HOURS)
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def list_checkins(event_id=None, telegram_id=None, fresh: bool = False) -> list:
+    ws = ensure_worksheet(SHEET_CHECKINS, CHECKIN_HEADERS)
+    _, rows = _rows_with_index(ws, fresh=fresh)
+    items = []
+    for row_number, record in rows:
+        tid = str(record.get("telegram_id", "")).strip()
+        if not tid:
+            continue
+        if event_id is not None and str(record.get("ID события", "")).strip() != str(event_id):
+            continue
+        if telegram_id is not None and tid != str(telegram_id):
+            continue
+        record["telegram_id"] = tid
+        record["_row"] = row_number
+        items.append(record)
+    return items
+
+
+def get_checkin(telegram_id, event_id, fresh: bool = True) -> Optional[dict]:
+    for record in list_checkins(event_id=event_id, telegram_id=telegram_id, fresh=fresh):
+        return record
+    return None
+
+
+def add_checkin(telegram_id, event_id, admin: str, method: str) -> str:
+    """Записывает приход, возвращает время отметки."""
+    ws = ensure_worksheet(SHEET_CHECKINS, CHECKIN_HEADERS)
+    when = _checkin_time()
+    ws.append_row([str(telegram_id), str(event_id), when, admin, method], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_CHECKINS)
+    return when
+
+
+def remove_checkin(telegram_id, event_id) -> Optional[dict]:
+    """Снимает отметку (ошибся / отметил не того). Возвращает снятую запись."""
+    ws = ensure_worksheet(SHEET_CHECKINS, CHECKIN_HEADERS)
+    _, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (
+            str(record.get("telegram_id", "")).strip() == str(telegram_id)
+            and str(record.get("ID события", "")).strip() == str(event_id)
+        ):
+            _delete_row(ws, row_number)
+            _invalidate_sheet_cache(SHEET_CHECKINS)
+            return record
+    return None

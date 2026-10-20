@@ -4,15 +4,18 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, Response, jsonify, request, session
 
 import avatar_client
+import calendar_links
+import checkin_tokens
 import prodamus_client
 import sheets_client as sheets
 import telegram_auth
 import webhook_client
 from config import Config
 from constants import (
+    CHECKIN_START_DATE,
     MAX_TICKETS_PER_SIGNUP,
     ONBOARDING_STEPS,
     POINTS_MAX_PERCENT,
@@ -537,7 +540,23 @@ def _event_price_for_tier(event: dict, tier: str) -> str:
     return event.get("Цена", "")
 
 
-def _public_event(e: dict, is_registered: bool, can_signup: bool, tier: str, registered_quantity: int = 0) -> dict:
+def _attended_event_ids(telegram_id, events_by_id: dict, paid_signups: list) -> set:
+    """ID событий, которые человек «посетил»: отмечен на входе (чекер) или —
+    для событий ДО запуска чекера (CHECKIN_START_DATE) — просто был записан и
+    событие прошло, иначе у всех прежних участников «Посетил» опустел бы."""
+    ids = {str(c.get("ID события")) for c in sheets.list_checkins(telegram_id=telegram_id)}
+    start = _parse_date(CHECKIN_START_DATE)
+    for signup in paid_signups:
+        event = events_by_id.get(str(signup.get("ID события")))
+        day = _parse_date(event.get("Дата", "")) if event else None
+        if event and day and start and day < start:
+            ids.add(str(event["id"]))
+    return ids
+
+
+def _public_event(
+    e: dict, is_registered: bool, can_signup: bool, tier: str, registered_quantity: int = 0, attended: bool = False
+) -> dict:
     price = _event_price_for_tier(e, tier)
     return {
         "id": e["id"],
@@ -553,6 +572,7 @@ def _public_event(e: dict, is_registered: bool, can_signup: bool, tier: str, reg
         "is_registered": is_registered,
         "can_signup": can_signup,
         "registered_quantity": registered_quantity,
+        "attended": attended,
         "max_tickets": MAX_TICKETS_PER_SIGNUP,
     }
 
@@ -576,8 +596,12 @@ def events():
         except ValueError:
             quantity_by_event[str(s.get("ID события"))] = 1
 
+    attended_ids = _attended_event_ids(telegram_id, {str(e["id"]): e for e in events_list}, signups)
     result = [
-        _public_event(e, str(e["id"]) in quantity_by_event, can_signup, tier, quantity_by_event.get(str(e["id"]), 0))
+        _public_event(
+            e, str(e["id"]) in quantity_by_event, can_signup, tier, quantity_by_event.get(str(e["id"]), 0),
+            attended=str(e["id"]) in attended_ids,
+        )
         for e in events_list
     ]
     return jsonify({"events": result})
@@ -602,13 +626,39 @@ def event_detail(event_id):
         # без telegram_id, чтобы фронтенд не мог сделать карточку кликабельной.
         attendees = [{"fio": a["fio"], "niche": a["niche"], "quantity": a["quantity"]} for a in attendees]
     registered_quantity = sheets.get_signup_quantity(telegram_id, event_id)
+    attended_ids = _attended_event_ids(telegram_id, {str(event["id"]): event}, sheets.list_signups_for_user(telegram_id))
     return jsonify(
         {
-            "event": _public_event(event, registered_quantity > 0, _can_signup(tier), tier, registered_quantity),
+            "event": _public_event(
+                event, registered_quantity > 0, _can_signup(tier), tier, registered_quantity,
+                attended=str(event["id"]) in attended_ids,
+            ),
             "attendees": attendees,
             "attendees_count": attendees_count,
             "can_view_attendee_profiles": tier == "resident",
+            # ссылки «Добавить в календарь»: Google, Outlook, файл .ics (None — у события нет даты)
+            "calendar": calendar_links.links(event, request.url_root),
         }
+    )
+
+
+@api.route("/calendar/<int:event_id>.ics", methods=["GET"])
+def calendar_ics(event_id):
+    """Файл .ics для календаря. Без сессии (его открывает внешний браузер или
+    приложение календаря, где куки Telegram нет) — доступ по подписанной ссылке
+    из /events/<id>, подпись привязана к ID события."""
+    if not calendar_links.verify(event_id, request.args.get("s", "")):
+        return "", 404
+    event = sheets.get_event(event_id)
+    body = calendar_links.build_ics(event, app_url=Config.BOT_LINK) if event else None
+    if not body:
+        return "", 404
+    return Response(
+        body, mimetype="text/calendar",
+        headers={
+            "Content-Disposition": f'inline; filename="banya-event-{event_id}.ics"',
+            "Cache-Control": "private, max-age=300",
+        },
     )
 
 
@@ -883,8 +933,22 @@ def profile():
     signups = sheets.list_signups_for_user(telegram_id)
     events_by_id = {str(e["id"]): e for e in sheets.list_events()}
     today = datetime.now().date()
+    attended_ids = _attended_event_ids(telegram_id, events_by_id, signups)
 
-    upcoming, past = [], []
+    def event_item(event, quantity):
+        return {
+            "id": event["id"],
+            "title": event.get("Название", ""),
+            "date": event.get("Дата", ""),
+            "time": event.get("Время", ""),
+            "place": event.get("Место", ""),
+            "quantity": quantity,
+        }
+
+    # «Посещу» — записан и ещё не был; «Посетил» — отмечен на входе (чекер) или
+    # событие до запуска чекера. Записан на прошедшее событие, но не отмечен —
+    # нигде не показываем.
+    upcoming, visited, seen = [], [], set()
     for signup in signups:
         event = events_by_id.get(str(signup.get("ID события")))
         if not event:
@@ -893,19 +957,19 @@ def profile():
             quantity = int(signup.get("Количество") or 1)
         except ValueError:
             quantity = 1
-        item = {
-            "id": event["id"],
-            "title": event.get("Название", ""),
-            "date": event.get("Дата", ""),
-            "time": event.get("Время", ""),
-            "place": event.get("Место", ""),
-            "quantity": quantity,
-        }
+        item = event_item(event, quantity)
+        seen.add(str(event["id"]))
         event_date = _parse_date(event.get("Дата", ""))
-        if event_date and event_date < today:
-            past.append(item)
-        else:
+        if str(event["id"]) in attended_ids:
+            visited.append(item)
+        elif not (event_date and event_date < today):
             upcoming.append(item)
+    # отметили на входе человека без записи (пришёл «с улицы») — тоже посещение
+    for event_id in attended_ids - seen:
+        event = events_by_id.get(event_id)
+        if event:
+            visited.append(event_item(event, 1))
+    visited.sort(key=lambda item: item["date"], reverse=True)
 
     achievements = [
         {
@@ -920,7 +984,21 @@ def profile():
         {
             "user": _public_user(user),
             "upcoming_events": upcoming,
-            "past_events": past,
+            "past_events": visited,
             "achievements": achievements,
         }
+    )
+
+
+@api.route("/profile/qr.svg", methods=["GET"])
+def profile_qr():
+    """Личный QR-код профиля — по нему администратор отмечает приход на мероприятие."""
+    telegram_id = _current_telegram_id()
+    if not telegram_id:
+        return jsonify({"error": "unauthorized"}), 401
+    if not sheets.find_user(telegram_id):
+        return jsonify({"error": "user_not_found"}), 404
+    return Response(
+        checkin_tokens.qr_svg(telegram_id), mimetype="image/svg+xml",
+        headers={"Cache-Control": "private, no-cache"},  # без общего кэша: на устройстве может быть другой аккаунт
     )
