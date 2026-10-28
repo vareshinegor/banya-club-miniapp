@@ -381,3 +381,18 @@ td .sub { display: block; color: var(--muted); font-size: 12.5px; }
 @media (max-width: 860px) {
   .scan-wrap { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------- выдача доступа новому админу ---------- */
+
+.cred-box {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px dashed var(--border-gold);
+  background: var(--field);
+  color: var(--text);
+  font: 14px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}

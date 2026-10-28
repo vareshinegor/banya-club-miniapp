@@ -12,6 +12,7 @@ from gspread.utils import rowcol_to_a1
 from config import Config
 from constants import (
     ADMIN_LOG_HEADERS,
+    ADMINS_HEADERS,
     CHECKIN_HEADERS,
     CHECKIN_TZ_OFFSET_HOURS,
     EVENTS_HEADERS,
@@ -22,6 +23,7 @@ from constants import (
     REFERRAL_REWARD_POINTS,
     SHEET_ACHIEVEMENTS,
     SHEET_ADMIN_LOG,
+    SHEET_ADMINS,
     SHEET_CHECKINS,
     SHEET_EVENTS,
     SHEET_GENERAL,
@@ -1137,3 +1139,63 @@ def remove_checkin(telegram_id, event_id) -> Optional[dict]:
             _invalidate_sheet_cache(SHEET_CHECKINS)
             return record
     return None
+
+
+# --- Учётные записи админ-панели -------------------------------------------
+
+
+def _admins_ws():
+    return ensure_worksheet(SHEET_ADMINS, ADMINS_HEADERS)
+
+
+def list_admins() -> list:
+    _, rows = _rows_with_index(_admins_ws())
+    items = []
+    for row_number, record in rows:
+        if (record.get("Логин") or "").strip():
+            record["_row"] = row_number
+            items.append(record)
+    return items
+
+
+def find_admin(login: str, fresh: bool = False) -> Optional[dict]:
+    """Запись админа по логину (без учёта регистра)."""
+    target = (login or "").strip().casefold()
+    if not target:
+        return None
+    _, rows = _rows_with_index(_admins_ws(), fresh=fresh)
+    for row_number, record in rows:
+        if (record.get("Логин") or "").strip().casefold() == target:
+            record["_row"] = row_number
+            return record
+    return None
+
+
+def add_admin(login: str, password_hash: str, role: str, created_by: str):
+    ws = _admins_ws()
+    ws.append_row([login, password_hash, role, "да", _now(), created_by], value_input_option="RAW")
+    _invalidate_sheet_cache(SHEET_ADMINS)
+
+
+def update_admin(login: str, values: dict) -> bool:
+    ws = _admins_ws()
+    headers, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (record.get("Логин") or "").strip().casefold() == login.strip().casefold():
+            data = _cell_updates(headers, row_number, values)
+            if data:
+                ws.batch_update(data)
+                _invalidate_sheet_cache(SHEET_ADMINS)
+            return True
+    return False
+
+
+def delete_admin(login: str) -> bool:
+    ws = _admins_ws()
+    _, rows = _rows_with_index(ws, fresh=True)
+    for row_number, record in rows:
+        if (record.get("Логин") or "").strip().casefold() == login.strip().casefold():
+            _delete_row(ws, row_number)
+            _invalidate_sheet_cache(SHEET_ADMINS)
+            return True
+    return False

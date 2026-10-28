@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 from flask import Blueprint, Response, g, jsonify, make_response, redirect, render_template, request, url_for
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import avatar_client
 import checkin_tokens
@@ -68,6 +69,20 @@ LOGIN_MAX_FAILS = 5
 
 _fails = {}  # ip -> [время неудачной попытки, ...]
 _fails_lock = threading.Lock()
+
+# Роли. owner — учётная запись из переменных окружения (единственная, кто управляет
+# остальными); admin — вся панель, кроме раздела «Админы»; checkin — только «Чекин».
+ROLE_OWNER, ROLE_ADMIN, ROLE_CHECKIN = "owner", "admin", "checkin"
+ROLE_LABELS = {ROLE_OWNER: "владелец", ROLE_ADMIN: "админ", ROLE_CHECKIN: "только чекин"}
+ASSIGNABLE_ROLES = (ROLE_ADMIN, ROLE_CHECKIN)
+ALL_ROLES = (ROLE_OWNER, ROLE_ADMIN, ROLE_CHECKIN)
+FULL_ACCESS = (ROLE_OWNER, ROLE_ADMIN)
+PASSWORD_MIN = 10
+_LOGIN_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,32}$")
+HASH_METHOD = "pbkdf2:sha256"
+# Хеш-заглушка: для несуществующего логина всё равно считаем проверку пароля,
+# иначе по времени ответа можно было бы выяснить, какие логины заведены.
+_DUMMY_HASH = generate_password_hash("not-a-real-password", method=HASH_METHOD)
 
 STATUSES = (STATUS_PENDING, STATUS_NON_RESIDENT, STATUS_RESIDENT)
 
@@ -106,7 +121,34 @@ def _current():
         return None
     if not isinstance(data, dict) or "u" not in data or "c" not in data:
         return None
+    # куки, выданные до появления ролей, принадлежали единственному админу — владельцу
+    data.setdefault("r", ROLE_OWNER)
     return data
+
+
+def _authenticate(login: str, password: str):
+    """-> (логин, роль) или None. Владелец — из переменных окружения, остальные —
+    из листа «Админы» (пароль хранится хешем). Сравнения в постоянное время."""
+    login = (login or "").strip()
+    password = password or ""
+    if _same(login.casefold(), Config.ADMIN_LOGIN.casefold()):
+        return (Config.ADMIN_LOGIN, ROLE_OWNER) if _same(password, Config.ADMIN_PASSWORD) else None
+    account = sheets.find_admin(login)  # обычный кэш: чужие попытки входа не должны выбирать квоту Google
+    stored = (account or {}).get("Хеш пароля") or _DUMMY_HASH
+    try:
+        password_ok = check_password_hash(stored, password)
+    except Exception:
+        password_ok = False
+    if account and password_ok and _account_active(account):
+        return account["Логин"].strip(), account["Роль"].strip()
+    return None
+
+
+def _account_active(account: dict) -> bool:
+    return (
+        (account.get("Активен") or "").strip().casefold() not in ("нет", "no", "false", "0")
+        and (account.get("Роль") or "").strip() in ASSIGNABLE_ROLES
+    )
 
 
 def _blocked(ip: str) -> bool:
@@ -130,24 +172,40 @@ def _err(code: str, message: str, status: int = 400):
     return jsonify({"error": code, "message": message}), status
 
 
-def admin_required(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if not _enabled():
-            return _err("disabled", "Админ-панель выключена", 503)
-        session = _current()
-        if not session:
-            return _err("unauthorized", "Нужно войти", 401)
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
-            if not _same(request.headers.get("X-CSRF-Token", ""), session["c"]):
-                return _err("csrf", "Сессия устарела — обновите страницу", 403)
-            origin = request.headers.get("Origin")
-            if origin and urlparse(origin).netloc != request.host:
-                return _err("csrf", "Запрос с чужого сайта отклонён", 403)
-        g.admin = session["u"]
-        return fn(*args, **kwargs)
+def admin_required(fn=None, *, roles=FULL_ACCESS):
+    """@admin_required — владелец и админ; @admin_required(roles=ALL_ROLES) —
+    ещё и «только чекин»; @admin_required(roles=(ROLE_OWNER,)) — только владелец."""
 
-    return wrapper
+    def decorator(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            if not _enabled():
+                return _err("disabled", "Админ-панель выключена", 503)
+            session = _current()
+            if not session:
+                return _err("unauthorized", "Нужно войти", 401)
+            role = session["r"]
+            if role != ROLE_OWNER:
+                # Учётку могли выключить, удалить или поменять ей роль уже после
+                # входа — не ждём конца 12-часовой сессии.
+                account = sheets.find_admin(session["u"])
+                if not account or not _account_active(account) or account["Роль"].strip() != role:
+                    return _err("unauthorized", "Доступ отозван — войдите заново", 401)
+            if role not in roles:
+                return _err("forbidden", "Недостаточно прав для этого раздела", 403)
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                if not _same(request.headers.get("X-CSRF-Token", ""), session["c"]):
+                    return _err("csrf", "Сессия устарела — обновите страницу", 403)
+                origin = request.headers.get("Origin")
+                if origin and urlparse(origin).netloc != request.host:
+                    return _err("csrf", "Запрос с чужого сайта отклонён", 403)
+            g.admin = session["u"]
+            g.role = role
+            return view(*args, **kwargs)
+
+        return wrapper
+
+    return decorator(fn) if fn else decorator
 
 
 @admin.after_request
@@ -183,22 +241,22 @@ def login():
             "admin/login.html", disabled=False, error="Слишком много попыток. Подождите 15 минут."
         ), 429
 
-    login_ok = _same(request.form.get("login", "").strip(), Config.ADMIN_LOGIN)
-    password_ok = _same(request.form.get("password", ""), Config.ADMIN_PASSWORD)
-    if not (login_ok and password_ok):
+    identity = _authenticate(request.form.get("login", ""), request.form.get("password", ""))
+    if not identity:
         _record_fail(ip)
         time.sleep(0.7)  # замедляем перебор
         return render_template("admin/login.html", disabled=False, error="Неверный логин или пароль"), 401
+    login_name, role = identity
 
     with _fails_lock:
         _fails.pop(ip, None)
-    token = _signer().dumps({"u": Config.ADMIN_LOGIN, "c": secrets.token_urlsafe(24)})
+    token = _signer().dumps({"u": login_name, "r": role, "c": secrets.token_urlsafe(24)})
     response = redirect(url_for("admin.index"))
     response.set_cookie(
         COOKIE, token, max_age=SESSION_TTL, httponly=True,
         secure=not Config.DEV_MODE, samesite="Strict", path="/admin",
     )
-    sheets.log_admin_action(Config.ADMIN_LOGIN, "Вход", "", f"ip {ip}")
+    sheets.log_admin_action(login_name, "Вход", "", f"ip {ip} · {ROLE_LABELS[role]}")
     return response
 
 
@@ -217,9 +275,30 @@ def index():
 
 
 @admin.route("/api/me")
-@admin_required
+@admin_required(roles=ALL_ROLES)
 def me():
-    return jsonify({"login": g.admin, "csrf": _current()["c"]})
+    return jsonify({
+        "login": g.admin, "role": g.role, "role_label": ROLE_LABELS[g.role],
+        "csrf": _current()["c"], "can_change_password": g.role != ROLE_OWNER,
+    })
+
+
+@admin.route("/api/me/password", methods=["POST"])
+@admin_required(roles=ALL_ROLES)
+def me_password():
+    """Своя смена пароля (для учёток из листа «Админы»; пароль владельца — в Railway)."""
+    if g.role == ROLE_OWNER:
+        return _err("owner", "Пароль владельца меняется в переменных Railway (ADMIN_PASSWORD)")
+    data = request.get_json(silent=True) or {}
+    account = sheets.find_admin(g.admin, fresh=True)
+    if not account or not check_password_hash(account.get("Хеш пароля") or _DUMMY_HASH, str(data.get("old") or "")):
+        return _err("bad_old", "Текущий пароль указан неверно")
+    new = str(data.get("new") or "")
+    if not PASSWORD_MIN <= len(new) <= 128:
+        return _err("bad_password", f"Новый пароль — от {PASSWORD_MIN} символов")
+    sheets.update_admin(g.admin, {"Хеш пароля": generate_password_hash(new, method=HASH_METHOD)})
+    _log("Смена пароля", g.admin, "своя учётная запись")
+    return jsonify({"status": "ok"})
 
 
 def _log(action: str, target: str = "", details: str = ""):
@@ -1041,6 +1120,96 @@ def log_list():
     return jsonify({"items": sheets.list_admin_log(300)})
 
 
+# --- Управление админами (только владелец) -----------------------------------
+
+
+def _admin_item(a: dict) -> dict:
+    return {
+        "login": (a.get("Логин") or "").strip(), "role": (a.get("Роль") or "").strip(),
+        "role_label": ROLE_LABELS.get((a.get("Роль") or "").strip(), "?"),
+        "active": _account_active(a), "created": a.get("Создан", ""), "created_by": a.get("Создал", ""),
+    }
+
+
+def _clean_password(value) -> str:
+    password = str(value or "")
+    if not PASSWORD_MIN <= len(password) <= 128:
+        raise ValueError(f"Пароль — от {PASSWORD_MIN} символов")
+    return password
+
+
+@admin.route("/api/admins")
+@admin_required(roles=(ROLE_OWNER,))
+def admins_list():
+    owner = {
+        "login": Config.ADMIN_LOGIN, "role": ROLE_OWNER, "role_label": ROLE_LABELS[ROLE_OWNER],
+        "active": True, "created": "", "created_by": "переменные Railway", "owner": True,
+    }
+    return jsonify({"admins": [owner] + [_admin_item(a) for a in sheets.list_admins()]})
+
+
+@admin.route("/api/admins", methods=["POST"])
+@admin_required(roles=(ROLE_OWNER,))
+def admin_create():
+    data = request.get_json(silent=True) or {}
+    login_name = _str(data, "login", 40)
+    role = _str(data, "role", 20)
+    if not _LOGIN_RE.match(login_name):
+        return _err("bad_login", "Логин — 3–32 символа: латиница, цифры, точка, «-» и «_»")
+    if role not in ASSIGNABLE_ROLES:
+        return _err("bad_role", "Роль — «админ» или «только чекин»")
+    if login_name.casefold() == Config.ADMIN_LOGIN.casefold() or sheets.find_admin(login_name, fresh=True):
+        return _err("exists", "Такой логин уже занят")
+    try:
+        password = _clean_password(data.get("password"))
+    except ValueError as exc:
+        return _err("bad_password", str(exc))
+    sheets.add_admin(login_name, generate_password_hash(password, method=HASH_METHOD), role, g.admin)
+    _log("Админ +", login_name, f"роль: {ROLE_LABELS[role]}")
+    return jsonify({"status": "ok"})
+
+
+@admin.route("/api/admins/<login_name>", methods=["PUT"])
+@admin_required(roles=(ROLE_OWNER,))
+def admin_update(login_name):
+    account = sheets.find_admin(login_name, fresh=True)
+    if not account:
+        return _err("not_found", "Такого админа нет", 404)
+    data = request.get_json(silent=True) or {}
+    values, notes = {}, []
+    if "role" in data:
+        role = _str(data, "role", 20)
+        if role not in ASSIGNABLE_ROLES:
+            return _err("bad_role", "Роль — «админ» или «только чекин»")
+        if role != (account.get("Роль") or "").strip():
+            values["Роль"] = role
+            notes.append(f"роль → {ROLE_LABELS[role]}")
+    if "active" in data:
+        values["Активен"] = "да" if data["active"] else "нет"
+        notes.append("включён" if data["active"] else "выключен")
+    if data.get("password"):
+        try:
+            values["Хеш пароля"] = generate_password_hash(_clean_password(data["password"]), method=HASH_METHOD)
+        except ValueError as exc:
+            return _err("bad_password", str(exc))
+        notes.append("пароль сброшен")
+    if not values:
+        return jsonify({"status": "ok", "changed": 0})
+    sheets.update_admin(account["Логин"], values)
+    _log("Админ ✎", account["Логин"], "; ".join(notes))
+    return jsonify({"status": "ok", "changed": len(values)})
+
+
+@admin.route("/api/admins/<login_name>", methods=["DELETE"])
+@admin_required(roles=(ROLE_OWNER,))
+def admin_delete(login_name):
+    account = sheets.find_admin(login_name, fresh=True)
+    if not account or not sheets.delete_admin(account["Логин"]):
+        return _err("not_found", "Такого админа нет", 404)
+    _log("Админ −", account["Логин"], f"роль была: {ROLE_LABELS.get((account.get('Роль') or '').strip(), '?')}")
+    return jsonify({"status": "ok"})
+
+
 # --- Чекер: отметка прихода на мероприятие ----------------------------------
 
 
@@ -1059,7 +1228,7 @@ def _checkin_card(user: dict) -> dict:
 
 
 @admin.route("/api/checkin", methods=["POST"])
-@admin_required
+@admin_required(roles=ALL_ROLES)
 def checkin():
     """Отмечает приход человека на событие. Человек задаётся кодом из его QR
     (code) или вручную (telegram_id). Ответ status:
@@ -1102,7 +1271,7 @@ def checkin():
 
 
 @admin.route("/api/checkin/<event_id>/<telegram_id>", methods=["DELETE"])
-@admin_required
+@admin_required(roles=ALL_ROLES)
 def checkin_undo(event_id, telegram_id):
     record = sheets.remove_checkin(telegram_id, event_id)
     if not record:
@@ -1110,3 +1279,50 @@ def checkin_undo(event_id, telegram_id):
     user = _find_user_or_404(telegram_id) or {}
     _log("Отметка снята", f"событие #{event_id}", f"{user.get('ФИО', telegram_id)} ({telegram_id}); было {record.get('Время', '')}")
     return jsonify({"status": "ok"})
+
+
+# Урезанные выдачи для страницы «Чекин»: ими пользуются и админы, и роль «только
+# чекин», поэтому здесь нет телефонов, дохода, оплат и промокодов — только то,
+# что нужно, чтобы найти человека и отметить приход.
+
+
+@admin.route("/api/checkin/events")
+@admin_required(roles=ALL_ROLES)
+def checkin_events():
+    events = [
+        {"id": str(e["id"]), "title": e.get("Название", ""), "date": e.get("Дата", ""), "time": e.get("Время", "")}
+        for e in sheets.admin_list_events()
+    ]
+    return jsonify({"events": events})
+
+
+@admin.route("/api/checkin/events/<event_id>/attendance")
+@admin_required(roles=ALL_ROLES)
+def checkin_attendance(event_id):
+    rows = [
+        {
+            "telegram_id": r["telegram_id"], "fio": r["fio"], "username": r["username"], "tier": r["tier"],
+            "status": r["status"], "quantity": r["quantity"],
+            "checked_in": r["checked_in"], "checkin_method": r["checkin_method"],
+        }
+        for r in _event_signup_rows(event_id)
+    ]
+    return jsonify({"signups": rows})
+
+
+@admin.route("/api/checkin/people")
+@admin_required(roles=ALL_ROLES)
+def checkin_people():
+    """Поиск человека для ручной отметки: по имени, @username и компании (по
+    телефону не ищем, чтобы роль «только чекин» не могла подбирать номера)."""
+    query = (request.args.get("q") or "").strip().casefold()
+    if len(query) < 2:
+        return jsonify({"people": []})
+    found = []
+    for u in sheets.list_users():
+        if any(query in (u.get(k) or "").casefold() for k in ("ФИО", "username", "Компания/Проект")):
+            card = _checkin_card(u)
+            found.append({k: card[k] for k in ("telegram_id", "fio", "username", "company", "tier", "avatar")})
+            if len(found) >= 8:
+                break
+    return jsonify({"people": found})

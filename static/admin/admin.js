@@ -14,6 +14,7 @@
     usersSort: { key: "registered", dir: -1 },
     eventsSeg: "upcoming",
     checkinEvent: null,
+    role: "",
   };
 
   const view = document.getElementById("view");
@@ -56,6 +57,7 @@
     book: ["M4 19.5A2.5 2.5 0 0 1 6.5 17H20", "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"],
     coin: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v12", "M9 9.5h4.5a1.8 1.8 0 0 1 0 3.5H9.5a1.8 1.8 0 0 0 0 3.5H15"],
     log: ["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"],
+    key: ["M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"],
     qr: ["M3 3h7v7H3z", "M14 3h7v7h-7z", "M3 14h7v7H3z", "M14 14h3v3h-3z", "M20 14v3", "M14 20h7", "M20 20h1"],
   };
 
@@ -897,7 +899,7 @@
   const localISO = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
   async function pageCheckin(ctx) {
-    const { events } = await api("/events");
+    const { events } = await api("/checkin/events");
     if (!events.length) {
       ctx.view(pageHead("Чекин", "Отметка прихода по QR-коду"), h("div", { class: "card" }, h("div", { class: "empty", text: "Сначала добавьте событие в Афише" })));
       return;
@@ -907,8 +909,6 @@
     const pick = () =>
       (byDate.find((e) => e.date === today) || byDate.find((e) => e.date > today) || byDate[byDate.length - 1]).id;
     if (!events.some((e) => String(e.id) === String(state.checkinEvent))) state.checkinEvent = pick();
-    if (!state.users.length) state.users = (await api("/users")).users;
-
     const eventLabel = (e) => `${dateLabel(e.date).replace(/ \d{4},/, ",")} — ${e.title}`;
     const select = h("select", { class: "input input-select", onchange: (e) => { state.checkinEvent = e.target.value; loadAttendance(); } },
       [...events].sort((a, b) => (a.date < b.date ? 1 : -1)).map((e) => h("option", { value: String(e.id), text: eventLabel(e) })));
@@ -1043,23 +1043,31 @@
       }
     });
 
-    // ---- ручная отметка
-    const search = h("input", { class: "input", type: "search", placeholder: "Найти человека: имя, телефон, @username…" });
+    // ---- ручная отметка (поиск на сервере: по имени, @username и компании)
+    const search = h("input", { class: "input", type: "search", placeholder: "Найти человека: имя, @username, компания…" });
     const found = h("div", { style: "margin-top:8px" });
+    let searchTimer = null;
     search.addEventListener("input", () => {
-      const q = search.value.trim().toLowerCase();
-      if (!q) { found.replaceChildren(); return; }
-      const list = state.users.filter((u) => [u.fio, u.phone, u.username, u.company].some((v) => (v || "").toLowerCase().includes(q))).slice(0, 6);
-      found.replaceChildren(...(list.length ? list.map((u) => h(
-        "div", { class: "list-row" },
-        personCell(u),
-        h("button", { class: "btn btn-sm btn-primary", type: "button", text: "Отметить", onclick: () => { submit({ telegram_id: u.telegram_id }); search.value = ""; found.replaceChildren(); } }),
-      )) : [h("div", { class: "muted", text: "Никого не нашлось" })]));
+      clearTimeout(searchTimer);
+      const q = search.value.trim();
+      if (q.length < 2) { found.replaceChildren(); return; }
+      searchTimer = setTimeout(async () => {
+        try {
+          const { people } = await api(`/checkin/people?q=${encodeURIComponent(q)}`);
+          found.replaceChildren(...(people.length ? people.map((u) => h(
+            "div", { class: "list-row" },
+            personCell(u),
+            h("button", { class: "btn btn-sm btn-primary", type: "button", text: "Отметить", onclick: () => { submit({ telegram_id: u.telegram_id }); search.value = ""; found.replaceChildren(); } }),
+          )) : [h("div", { class: "muted", text: "Никого не нашлось" })]));
+        } catch (err) {
+          toast(err.message, "error");
+        }
+      }, 300);
     });
 
     // ---- таблица пришедших/записавшихся
     async function loadAttendance() {
-      const { signups } = await api(`/events/${encodeURIComponent(state.checkinEvent)}/signups`);
+      const { signups } = await api(`/checkin/events/${encodeURIComponent(state.checkinEvent)}/attendance`);
       const live = signups.filter((r) => r.status !== "отклонено");
       const paid = live.filter((r) => r.status === "оплачено");
       const checked = live.filter((r) => r.checked_in);
@@ -1109,6 +1117,139 @@
       h("div", { class: "card" }, h("h2", {}, "Кто пришёл"), attendance),
     );
     await loadAttendance();
+  }
+
+  // ------------------------------------------------------------------- админы
+
+  // Пароль: без похожих символов (0/O, 1/l/I), чтобы его можно было прочитать
+  // с экрана и передать голосом.
+  function generatePassword(length = 14) {
+    const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const bytes = new Uint32Array(length);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (n) => alphabet[n % alphabet.length]).join("");
+  }
+
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text).then(() => true, () => false);
+    return Promise.resolve(false);
+  }
+
+  async function pageAdmins(ctx) {
+    const { admins } = await api("/admins");
+    const roleOptions = (current) => [["admin", "Админ — вся панель, кроме раздела «Админы»"], ["checkin", "Только чекин — отметка прихода, без анкет и денег"]]
+      .map(([value, label]) => h("option", { value, text: label, selected: value === current }));
+
+    const tbl = table(
+      [
+        { label: "Логин", render: (a) => [h("strong", { text: a.login }), a.owner ? h("span", { class: "sub", text: "владелец, пароль и логин — в переменных Railway" }) : null] },
+        { label: "Роль", render: (a) => h("span", { class: `badge ${a.role === "owner" ? "badge-resident" : a.role === "admin" ? "badge-non_resident" : "badge-past"}`, text: a.role_label }) },
+        { label: "Доступ", render: (a) => h("span", { class: `badge ${a.active ? "badge-paid" : "badge-failed"}`, text: a.active ? "включён" : "выключен" }) },
+        { label: "Создан", cls: "nowrap", render: (a) => [a.created || "—", a.created_by ? h("span", { class: "sub", text: a.created_by }) : null] },
+        {
+          label: "", cls: "nowrap",
+          render: (a) => (a.owner ? "" : h("div", { class: "page-actions" },
+            h("button", { class: "btn btn-sm", type: "button", text: "Изменить", onclick: () => openAdminForm(a) }),
+            h("button", { class: "btn btn-sm btn-ghost", type: "button", text: a.active ? "Выключить" : "Включить", onclick: async (e) => {
+              const ok = await run(e.currentTarget, () => api(`/admins/${encodeURIComponent(a.login)}`, { method: "PUT", json: { active: !a.active } }), a.active ? "Доступ выключен" : "Доступ включён");
+              if (ok) route();
+            } }),
+          )),
+        },
+      ],
+      admins,
+      { empty: "Админов пока нет" },
+    );
+
+    ctx.view(
+      pageHead("Админы", "Кто может заходить в эту панель", h("button", { class: "btn btn-primary", type: "button", text: "+ Добавить человека", onclick: () => openAdminForm(null) })),
+      h("div", { class: "notice", text: "«Админ» видит всё, кроме этого раздела. «Только чекин» видит одну страницу «Чекин» (имя, фото, отметка прихода) — без анкет, телефонов и денег: подходит для человека на входе. Выключенный человек теряет доступ сразу, даже если он сейчас в панели." }),
+      tbl,
+    );
+  }
+
+  function openAdminForm(a) {
+    const isNew = !a;
+    const login = h("input", { type: "text", value: a ? a.login : "", maxlength: "32", disabled: !isNew, placeholder: "например, anna.kuznetsova", autocomplete: "off", autocapitalize: "none" });
+    const role = h("select", { class: "input-select" },
+      [["admin", "Админ — вся панель, кроме раздела «Админы»"], ["checkin", "Только чекин — отметка прихода, без анкет и денег"]]
+        .map(([value, label]) => h("option", { value, text: label })));
+    role.value = a ? a.role : "checkin";
+    const password = h("input", { type: "text", value: isNew ? generatePassword() : "", autocomplete: "off", spellcheck: "false", placeholder: isNew ? "" : "оставьте пустым, чтобы не менять" });
+    const genBtn = h("button", { class: "btn btn-sm", type: "button", text: "Сгенерировать", onclick: () => { password.value = generatePassword(); } });
+    let modal;
+    const body = h(
+      "div", {},
+      field("Логин", login, isNew ? "Латиница, цифры, точка, «-» и «_»; регистр не важен" : "Логин менять нельзя — создайте нового"),
+      field("Роль", role),
+      field(isNew ? "Пароль" : "Новый пароль (сброс)", password, `От 10 символов. ${isNew ? "Передайте его человеку сами: после сохранения посмотреть пароль будет нельзя — только сбросить." : "Старый пароль перестанет подходить."}`),
+      h("div", { class: "upload-row" }, genBtn),
+      h("div", { class: "modal-actions" },
+        !isNew ? h("button", {
+          class: "btn btn-danger", type: "button", style: "margin-right:auto", text: "Удалить",
+          onclick: async () => {
+            if (!(await confirmBox(`Удалить доступ «${a.login}»? Человек сразу потеряет вход в панель.`, { danger: true, confirmText: "Удалить" }))) return;
+            const ok = await run(null, () => api(`/admins/${encodeURIComponent(a.login)}`, { method: "DELETE" }), "Доступ удалён");
+            if (ok) { modal.close(); route(); }
+          },
+        }) : null,
+        h("button", { class: "btn btn-ghost", type: "button", text: "Отмена", onclick: () => modal.close() }),
+        h("button", {
+          class: "btn btn-primary", type: "button", text: isNew ? "Создать доступ" : "Сохранить",
+          onclick: async (e) => {
+            const payload = isNew ? { login: login.value, role: role.value, password: password.value } : { role: role.value, password: password.value };
+            const shown = { login: login.value.trim(), password: password.value };
+            const ok = await run(e.currentTarget, () => api(isNew ? "/admins" : `/admins/${encodeURIComponent(a.login)}`, { method: isNew ? "POST" : "PUT", json: payload }), isNew ? "Доступ создан" : "Сохранено");
+            if (!ok) return;
+            modal.close();
+            route(); // route() очищает все модальные окна — поэтому окно с паролем открываем уже после него
+            if (isNew || shown.password) showCredentials(shown.login, shown.password, role.value);
+          },
+        }),
+      ),
+    );
+    modal = openModal(isNew ? "Новый доступ в панель" : `Доступ: ${a.login}`, body);
+  }
+
+  // Пароль виден только здесь и один раз — на сервере хранится лишь его хеш.
+  function showCredentials(loginName, password, roleKey) {
+    const url = `${location.origin}/admin/login`;
+    const text = `Панель «Банный Орден»\nАдрес: ${url}\nЛогин: ${loginName}\nПароль: ${password}`;
+    let modal;
+    const status = h("span", { class: "hint", text: "" });
+    const box = h("pre", { class: "cred-box", text });
+    modal = openModal("Передайте доступ человеку", h(
+      "div", {},
+      h("p", { class: "hint", text: `Роль: ${roleKey === "admin" ? "админ" : "только чекин"}. Это окно покажет пароль один раз — закроете, и посмотреть его будет нельзя (только сбросить).` }),
+      box,
+      h("div", { class: "modal-actions" },
+        status,
+        h("button", { class: "btn", type: "button", text: "Скопировать", onclick: async () => {
+          const ok = await copyToClipboard(text);
+          if (!ok) { const r = document.createRange(); r.selectNodeContents(box); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
+          status.textContent = ok ? "Скопировано" : "Текст выделен — нажмите Ctrl+C";
+        } }),
+        h("button", { class: "btn btn-primary", type: "button", text: "Готово", onclick: () => modal.close() }),
+      ),
+    ));
+  }
+
+  function openChangePassword() {
+    const oldPw = h("input", { type: "password", autocomplete: "current-password" });
+    const newPw = h("input", { type: "password", autocomplete: "new-password" });
+    let modal;
+    modal = openModal("Смена пароля", h(
+      "div", {},
+      field("Текущий пароль", oldPw),
+      field("Новый пароль", newPw, "От 10 символов"),
+      h("div", { class: "modal-actions" },
+        h("button", { class: "btn btn-ghost", type: "button", text: "Отмена", onclick: () => modal.close() }),
+        h("button", { class: "btn btn-primary", type: "button", text: "Сменить", onclick: async (e) => {
+          const ok = await run(e.currentTarget, () => api("/me/password", { method: "POST", json: { old: oldPw.value, new: newPw.value } }), "Пароль изменён");
+          if (ok) modal.close();
+        } }),
+      ),
+    ));
   }
 
   // -------------------------------------------------------------------- promo
@@ -1314,16 +1455,20 @@
 
   // ------------------------------------------------------------------- router
 
+  const FULL = ["owner", "admin"];
   const NAV = [
-    { key: "dashboard", href: "#/dashboard", label: "Обзор", icon: "dashboard" },
-    { key: "users", href: "#/users", label: "Люди", icon: "users", badge: true },
-    { key: "events", href: "#/events", label: "Афиша", icon: "calendar" },
-    { key: "checkin", href: "#/checkin", label: "Чекин", icon: "qr" },
-    { key: "promo", href: "#/promo", label: "Промокоды", icon: "tag" },
-    { key: "materials", href: "#/materials", label: "Материалы", icon: "book" },
-    { key: "points", href: "#/points", label: "Дубики", icon: "coin" },
-    { key: "log", href: "#/log", label: "Журнал", icon: "log" },
+    { key: "dashboard", href: "#/dashboard", label: "Обзор", icon: "dashboard", roles: FULL },
+    { key: "users", href: "#/users", label: "Люди", icon: "users", badge: true, roles: FULL },
+    { key: "events", href: "#/events", label: "Афиша", icon: "calendar", roles: FULL },
+    { key: "checkin", href: "#/checkin", label: "Чекин", icon: "qr", roles: ["owner", "admin", "checkin"] },
+    { key: "promo", href: "#/promo", label: "Промокоды", icon: "tag", roles: FULL },
+    { key: "materials", href: "#/materials", label: "Материалы", icon: "book", roles: FULL },
+    { key: "points", href: "#/points", label: "Дубики", icon: "coin", roles: FULL },
+    { key: "log", href: "#/log", label: "Журнал", icon: "log", roles: FULL },
+    { key: "admins", href: "#/admins", label: "Админы", icon: "key", roles: ["owner"] },
   ];
+  const NAV_ROLES = Object.fromEntries(NAV.map((n) => [n.key, n.roles]));
+  const homeHash = () => (state.role === "checkin" ? "#/checkin" : "#/dashboard");
 
   const ROUTES = [
     { re: /^#\/dashboard$/, nav: "dashboard", render: (ctx) => pageDashboard(ctx) },
@@ -1336,11 +1481,12 @@
     { re: /^#\/materials$/, nav: "materials", render: (ctx) => pageMaterials(ctx) },
     { re: /^#\/points$/, nav: "points", render: (ctx) => pagePoints(ctx) },
     { re: /^#\/log$/, nav: "log", render: (ctx) => pageLog(ctx) },
+    { re: /^#\/admins$/, nav: "admins", render: (ctx) => pageAdmins(ctx) },
   ];
 
   function buildNav() {
     const nav = document.getElementById("nav");
-    nav.replaceChildren(...NAV.map((n) => h(
+    nav.replaceChildren(...NAV.filter((n) => n.roles.includes(state.role)).map((n) => h(
       "a", { href: n.href, "data-nav": n.key },
       icon(n.icon), n.label,
       n.badge ? h("span", { class: "badge-count", id: "pending-count", hidden: true, title: "Заявок на рассмотрении" }) : null,
@@ -1352,7 +1498,7 @@
   }
 
   async function route() {
-    const hash = location.hash || "#/dashboard";
+    const hash = location.hash || homeHash();
     const seq = ++renderSeq;
     stopScanner();
     let matched = null;
@@ -1360,7 +1506,8 @@
       const m = r.re.exec(hash);
       if (m) { matched = { r, m }; break; }
     }
-    if (!matched) { location.hash = "#/dashboard"; return; }
+    if (!matched) { location.hash = homeHash(); return; }
+    if (!NAV_ROLES[matched.r.nav].includes(state.role)) { location.hash = homeHash(); return; } // раздел не для этой роли
     markNav(matched.r.nav);
     // при смене страницы закрываем открытые модальные окна
     document.getElementById("modal-root").replaceChildren();
@@ -1379,10 +1526,17 @@
       const me = await api("/me");
       state.csrf = me.csrf;
       state.login = me.login;
+      state.role = me.role;
+      state.roleLabel = me.role_label;
+      state.canChangePassword = me.can_change_password;
     } catch (err) {
       return; // 401 уже перенаправил на страницу входа
     }
-    document.getElementById("whoami").textContent = state.login;
+    document.getElementById("whoami").textContent = `${state.login} · ${state.roleLabel}`;
+    if (state.canChangePassword) {
+      const foot = document.querySelector(".sidebar-foot");
+      foot.insertBefore(h("button", { class: "btn btn-ghost btn-sm", type: "button", text: "Пароль", title: "Сменить свой пароль", onclick: openChangePassword }), foot.querySelector("form"));
+    }
     buildNav();
     window.addEventListener("hashchange", route);
     route();
